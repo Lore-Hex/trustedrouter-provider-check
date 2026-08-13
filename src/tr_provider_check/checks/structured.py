@@ -9,7 +9,7 @@ import httpx
 from jsonschema import Draft202012Validator, ValidationError
 
 from tr_provider_check.contract import _chat_text, _response_error
-from tr_provider_check.http import GatewayClient
+from tr_provider_check.http import GatewayClient, probe_inconclusive
 from tr_provider_check.report import CheckResult, CheckStatus, check_result
 
 _OUTPUT_SCHEMA: dict[str, Any] = {
@@ -77,14 +77,26 @@ async def _run_response_format(
 
     if response.status_code != 200:
         error_type, error_status, error_message = _response_error(response)
-        rejection_status: CheckStatus = "warn" if declared is True else "skip"
+        # A 5xx/429 means the backend never read the request, so nothing was
+        # learned about response_format support. Saying it was "rejected"
+        # states a cause the evidence does not support.
+        inconclusive = probe_inconclusive(response.status_code)
+        rejection_status: CheckStatus = (
+            "warn" if inconclusive or declared is True else "skip"
+        )
         return check_result(
             id=check_id,
             tier=5,
             status=rejection_status,
             assertion=assertion,
             measured={
-                "reason": "response_format was rejected",
+                "reason": (
+                    "backend unavailable during the probe; response_format "
+                    "support is unknown"
+                    if inconclusive
+                    else "response_format was rejected"
+                ),
+                "inconclusive": inconclusive,
                 "capability_declared": declared,
                 "http_status": response.status_code,
             },

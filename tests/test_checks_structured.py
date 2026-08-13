@@ -119,3 +119,25 @@ async def test_declared_false_structured_output_skips_without_requests(
     assert rows["structured.json-object"].status == "skip"
     assert rows["structured.json-schema"].status == "skip"
     assert mock_server.request_log == []
+
+
+@pytest.mark.asyncio
+async def test_backend_outage_during_probe_is_inconclusive_not_a_rejection(
+    mock_server: MockOpenAIServer,
+) -> None:
+    # A live applicant with intermittent 502s was told response_format was
+    # "rejected" and that it rejected temperature: 0 -- a confident diagnosis
+    # the evidence never supported. A 5xx means the request was never read.
+    probes = await _run(mock_server, "capability_probe_backend_down")
+
+    structured = probes["structured.json-object"]
+    assert structured.status == "warn"
+    assert structured.measured["inconclusive"] is True
+    assert "unknown" in structured.measured["reason"]
+
+    # Negative control: a real 4xx refusal must still read as a refusal.
+    refused = (await _run(mock_server, "rejects_response_format"))[
+        "structured.json-object"
+    ]
+    assert refused.measured["inconclusive"] is False
+    assert "rejected" in refused.measured["reason"]

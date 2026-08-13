@@ -13,6 +13,7 @@ from tr_provider_check.contract import (
     _response_error,
 )
 from tr_provider_check.http import (
+    probe_inconclusive,
     gateway_omits_temperature,
     GatewayClient,
     max_token_parameter,
@@ -258,6 +259,13 @@ async def run_chat_checks(client: GatewayClient, model: str) -> list[CheckResult
                 prompt=PONG_PROMPT,
                 temperature=0,
             )
+            # Only a 4xx tells us the field was refused; a 5xx/429 means the
+            # backend never read it. A live applicant with intermittent 502s
+            # was reported as rejecting temperature, then accepted the same
+            # request minutes later.
+            temperature_inconclusive = probe_inconclusive(
+                temperature_response.status_code
+            )
             temperature_ok = temperature_response.status_code == 200
             temperature_error = (
                 (None, None, None)
@@ -267,15 +275,25 @@ async def run_chat_checks(client: GatewayClient, model: str) -> list[CheckResult
             temperature_status = temperature_response.status_code
         except httpx.HTTPError as error:
             temperature_ok = False
+            temperature_inconclusive = True
             temperature_status = None
             temperature_error = (error.__class__.__name__, None, None)
         results.append(
             check_result(
                 id="chat.temperature-zero",
                 tier=3,
-                status="pass" if temperature_ok else "fail",
+                status=(
+                    "pass"
+                    if temperature_ok
+                    else "warn"
+                    if temperature_inconclusive
+                    else "fail"
+                ),
                 assertion="temperature: 0 is accepted when the gateway sends it",
-                measured={"http_status": temperature_status},
+                measured={
+                    "http_status": temperature_status,
+                    "inconclusive": (not temperature_ok) and temperature_inconclusive,
+                },
                 contract_ref="enclave-go/internal/llm/byok.go::openAICompatibleTemperature",
                 marketplace_bullet="Gateway-supported deterministic sampling requests are accepted.",
                 remediation="Permit numeric temperature=0 in the chat request schema and pass it to the engine; if the model itself forbids temperature, ensure its declared provider/model identity matches a TrustedRouter omission gate.",

@@ -45,6 +45,7 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
         "native_noncanonical_ids": "Native discovery returns valid engine-native ids without owner prefixes.",
         "models_without_object_envelope": "Native discovery omits the top-level object:list envelope (pearlresearch.ai).",
         "models_without_data_array": "Native discovery returns an object with no data[] array at all.",
+        "capability_probe_backend_down": "A capability probe hits a 502 rather than a parameter refusal.",
     },
     "request_rejected_before_completion": {
         "queue_then_429": "Queueing consumes the probe budget before capacity rejects.",
@@ -611,6 +612,13 @@ class _MockHandler(BaseHTTPRequestHandler):
                     }
                 },
             )
+            return
+        if mode == "capability_probe_backend_down" and (
+            "response_format" in payload or payload.get("temperature") == 0
+        ):
+            # The applicant case: an intermittently dead backend answers the
+            # capability probe with 502. Nothing was learned about support.
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": {"type": "api_error"}})
             return
         if mode == "rejects_response_format" and "response_format" in payload:
             self._send_json(
