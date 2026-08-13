@@ -12,6 +12,7 @@ import pytest
 from tests.mockserver.app import HANG_GUARD_SECONDS, MockOpenAIServer
 from tr_provider_check.contract import _StreamObservation, _StreamUsage
 from tr_provider_check.http import (
+    gateway_omits_temperature,
     provider_for_base_url,
     GatewayClient,
     max_token_parameter,
@@ -296,3 +297,28 @@ def test_max_token_spelling_follows_the_endpoint_host(
 ) -> None:
     provider = provider_for_base_url(base_url)
     assert max_token_parameter(provider, model) == expected
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "omitted"),
+    [
+        # Provider-independent: the enclave omits temperature for these
+        # wherever they are served, because hosted routes reject temperature=0
+        # too. The probe's narrower rule would send it and fail the host.
+        ("novita", "moonshotai/kimi-k2.5", True),
+        ("together", "kimi-k3", True),
+        ("kimi", "moonshotai/kimi-k2.1", True),
+        # OpenAI reasoning family, including a bare native id with no prefix.
+        ("openai", "gpt-5.4-nano", True),
+        ("openai", "openai/o3", True),
+        # Everything else keeps temperature, so rejecting it really does break
+        # routing and must stay a hard failure.
+        ("zai", "glm-4.6", False),
+        ("", "zai-org/GLM-5.2", False),
+        ("openai", "gpt-4o-mini", False),
+    ],
+)
+def test_temperature_omission_follows_the_gateway_not_the_probe(
+    provider: str, model: str, omitted: bool
+) -> None:
+    assert gateway_omits_temperature(provider, model) is omitted

@@ -11,9 +11,9 @@ from tr_provider_check.contract import (
     _chat_text,
     _pong_matches,
     _response_error,
-    _rotation_omits_temperature,
 )
 from tr_provider_check.http import (
+    gateway_omits_temperature,
     GatewayClient,
     max_token_parameter,
     provider_for_model,
@@ -236,7 +236,7 @@ async def run_chat_checks(client: GatewayClient, model: str) -> list[CheckResult
         )
 
     provider = client.provider or provider_for_model(model)
-    if _rotation_omits_temperature(provider, model):
+    if gateway_omits_temperature(provider, model):
         results.append(
             check_result(
                 id="chat.temperature-zero",
@@ -244,7 +244,7 @@ async def run_chat_checks(client: GatewayClient, model: str) -> list[CheckResult
                 status="skip",
                 assertion="temperature: 0 is accepted when the gateway sends it",
                 measured={
-                    "reason": "vendored production gate omits temperature for this provider/model"
+                    "reason": "the gateway omits temperature for this provider/model (byok.go openAICompatibleTemperature)"
                 },
                 contract_ref="enclave-go/internal/llm/byok.go::openAICompatibleTemperature; vendored _rotation_omits_temperature",
                 marketplace_bullet="Gateway-supported deterministic sampling requests are accepted.",

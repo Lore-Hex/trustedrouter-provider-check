@@ -75,6 +75,34 @@ def max_token_parameter(provider: str, model: str) -> MaxTokenParameter:
     return "max_tokens"
 
 
+def gateway_omits_temperature(provider: str, model: str) -> bool:
+    """Mirror byok.go's openAICompatibleTemperature omission rule.
+
+    The vendored ``_rotation_omits_temperature`` is the SYNTHETIC PROBE's rule
+    and is narrower than what production actually sends. The gateway drops
+    temperature whenever ``kimiUsesFixedSampling`` or
+    ``requiresMaxCompletionTokens`` holds, and the first of those is
+    provider-independent: a k2.5 served by Novita or Together also gets it
+    omitted, because those hosted routes reject temperature=0 with
+    invalid_request_error too. Asserting the probe's narrower rule would send
+    temperature to a route production never sends it to, and fail a provider
+    for a request TrustedRouter would never make.
+    """
+
+    model_l = model.casefold()
+    provider_l = provider.casefold()
+    kimi_fixed_sampling = (
+        "kimi-k2.5" in model_l
+        or "kimi-k2.6" in model_l
+        or "kimi-k3" in model_l
+        or (provider_l == "kimi" and "kimi-k2." in model_l)
+    )
+    return (
+        kimi_fixed_sampling
+        or max_token_parameter(provider, model) == "max_completion_tokens"
+    )
+
+
 def _is_transient_status(status_code: int) -> bool:
     return status_code == 429 or 500 <= status_code <= 599
 
