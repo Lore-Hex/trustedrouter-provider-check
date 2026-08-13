@@ -1,0 +1,338 @@
+{
+  "$defs": {
+    "model": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "additionalProperties": false,
+          "properties": {
+            "prompt_caching": {
+              "type": "boolean"
+            },
+            "reasoning": {
+              "type": "boolean"
+            },
+            "streaming": {
+              "type": "boolean"
+            },
+            "structured_output": {
+              "type": "boolean"
+            },
+            "tools": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "streaming",
+            "tools",
+            "structured_output",
+            "reasoning",
+            "prompt_caching"
+          ],
+          "type": "object"
+        },
+        "context_length": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "endpoints": {
+          "items": {
+            "enum": [
+              "chat/completions",
+              "responses"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$",
+          "type": "string"
+        },
+        "input_modalities": {
+          "items": {
+            "enum": [
+              "text",
+              "image",
+              "audio",
+              "video",
+              "file"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "lifecycle": {
+          "additionalProperties": false,
+          "properties": {
+            "deprecation_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replacement_model_id": {
+              "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "retirement_at": {
+              "format": "date-time",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "active",
+                "deprecated",
+                "retired"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "deprecation_at",
+            "retirement_at",
+            "replacement_model_id"
+          ],
+          "type": "object"
+        },
+        "max_output_tokens": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "object": {
+          "const": "model"
+        },
+        "output_modalities": {
+          "items": {
+            "enum": [
+              "text",
+              "image",
+              "audio"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "owned_by": {
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "type": "string"
+        },
+        "pricing": {
+          "additionalProperties": false,
+          "properties": {
+            "cache_write": {
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cached_input": {
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "currency": {
+              "const": "USD"
+            },
+            "input": {
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+              "type": "string"
+            },
+            "minimum_request": {
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+              "type": "string"
+            },
+            "output": {
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+              "type": "string"
+            },
+            "unit": {
+              "const": "per_1m_tokens"
+            }
+          },
+          "required": [
+            "currency",
+            "unit",
+            "input",
+            "output",
+            "cached_input",
+            "cache_write",
+            "minimum_request"
+          ],
+          "type": "object"
+        },
+        "reliability": {
+          "additionalProperties": false,
+          "properties": {
+            "capacity_scope": {
+              "enum": [
+                "global",
+                "region",
+                "model",
+                "model_region"
+              ]
+            },
+            "completion_timeout_seconds": {
+              "exclusiveMinimum": 0,
+              "maximum": 900,
+              "type": "number"
+            },
+            "first_token_timeout_seconds": {
+              "exclusiveMinimum": 0,
+              "maximum": 300,
+              "type": "number"
+            },
+            "stream_idle_timeout_seconds": {
+              "exclusiveMinimum": 0,
+              "maximum": 300,
+              "type": "number"
+            }
+          },
+          "required": [
+            "first_token_timeout_seconds",
+            "completion_timeout_seconds",
+            "stream_idle_timeout_seconds",
+            "capacity_scope"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "chat"
+        }
+      },
+      "required": [
+        "id",
+        "object",
+        "owned_by",
+        "name",
+        "type",
+        "context_length",
+        "max_output_tokens",
+        "endpoints",
+        "input_modalities",
+        "output_modalities",
+        "capabilities",
+        "pricing",
+        "lifecycle",
+        "reliability"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trustedrouter.com/providers/marketplace/catalog.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Canonical models, pricing, lifecycle, regional capacity, deadlines, and machine-readable overload semantics for TrustedRouter providers.",
+  "properties": {
+    "contract_version": {
+      "const": "2.0"
+    },
+    "data": {
+      "items": {
+        "$ref": "#/$defs/model"
+      },
+      "type": "array"
+    },
+    "object": {
+      "const": "list"
+    },
+    "provider": {
+      "additionalProperties": false,
+      "properties": {
+        "error_contract": {
+          "additionalProperties": false,
+          "properties": {
+            "account_quota_error_codes": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "overload_status": {
+              "const": 503
+            },
+            "rate_limit_status": {
+              "const": 429
+            },
+            "retry_after_header": {
+              "const": "Retry-After"
+            }
+          },
+          "required": [
+            "rate_limit_status",
+            "overload_status",
+            "retry_after_header",
+            "account_quota_error_codes"
+          ],
+          "type": "object"
+        },
+        "id": {
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "type": "string"
+        },
+        "incident_contact": {
+          "format": "uri",
+          "type": "string"
+        },
+        "regions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "request_id_header": {
+          "pattern": "^[A-Za-z0-9-]+$",
+          "type": "string"
+        },
+        "status_url": {
+          "format": "uri",
+          "type": "string"
+        },
+        "support_contact": {
+          "format": "uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status_url",
+        "support_contact",
+        "incident_contact",
+        "regions",
+        "request_id_header",
+        "error_contract"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "object",
+    "contract_version",
+    "provider",
+    "data"
+  ],
+  "title": "TrustedRouter provider reliability contract v2",
+  "type": "object"
+}

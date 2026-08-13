@@ -1,0 +1,156 @@
+{
+  "$id": "https://trustedrouter.com/providers/provider-check/report.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "assertion": {"minLength": 1, "type": "string"},
+          "contract_ref": {"minLength": 1, "type": "string"},
+          "failure_class": {
+            "enum": [
+              "success",
+              "provider_capacity",
+              "provider_internal",
+              "provider_timeout",
+              "provider_stream",
+              "trustedrouter_capacity",
+              "router_fault",
+              "customer_quota",
+              "provider_auth_config",
+              "unsupported_route",
+              "probe_config_error",
+              "unknown"
+            ]
+          },
+          "id": {"minLength": 1, "type": "string"},
+          "marketplace_bullet": {"minLength": 1, "type": "string"},
+          "measured": {"type": "object"},
+          "owner": {
+            "enum": [
+              "none",
+              "provider",
+              "trustedrouter",
+              "configuration",
+              "customer",
+              "unknown"
+            ]
+          },
+          "remediation": {"minLength": 1, "type": "string"},
+          "status": {"enum": ["pass", "fail", "warn", "skip"]},
+          "tier": {"maximum": 6, "minimum": 1, "type": "integer"}
+        },
+        "required": [
+          "id",
+          "tier",
+          "status",
+          "assertion",
+          "owner",
+          "failure_class",
+          "measured",
+          "contract_ref",
+          "marketplace_bullet",
+          "remediation"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "contract_version": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "generated_at": {"format": "date-time", "type": "string"},
+    "performance": {
+      "properties": {"advisory": {"const": true}},
+      "required": ["advisory"],
+      "type": "object"
+    },
+    "report_version": {"const": "1.0"},
+    "submission": {
+      "additionalProperties": false,
+      "properties": {
+        "canonicalization": {"const": "JCS/RFC8785"},
+        "nonce": {"type": "null"},
+        "signature": {"type": "null"},
+        "signing_key_id": {"type": "null"}
+      },
+      "required": [
+        "signature",
+        "signing_key_id",
+        "canonicalization",
+        "nonce"
+      ],
+      "type": "object"
+    },
+    "suite_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$",
+      "type": "string"
+    },
+    "summary": {
+      "additionalProperties": false,
+      "properties": {
+        "conformance_gate": {"type": "boolean"},
+        "failed": {"minimum": 0, "type": "integer"},
+        "passed": {"minimum": 0, "type": "integer"},
+        "provider_owned_failures": {"minimum": 0, "type": "integer"},
+        "skipped": {"minimum": 0, "type": "integer"},
+        "warned": {"minimum": 0, "type": "integer"}
+      },
+      "required": [
+        "passed",
+        "failed",
+        "warned",
+        "skipped",
+        "conformance_gate",
+        "provider_owned_failures"
+      ],
+      "type": "object"
+    },
+    "target": {
+      "additionalProperties": false,
+      "properties": {
+        "authentication": {
+          "additionalProperties": false,
+          "properties": {
+            "authorization_header_sent": {"type": "boolean"},
+            "mode": {"enum": ["bearer", "none", "unspecified"]},
+            "note": {"minLength": 1, "type": "string"}
+          },
+          "required": ["mode", "authorization_header_sent", "note"],
+          "type": "object"
+        },
+        "base_url": {"minLength": 1, "type": "string"},
+        "catalog_url": {"type": ["string", "null"]},
+        "max_sweep_models": {"type": ["integer", "null"]},
+        "model": {"type": ["string", "null"]},
+        "perf_samples": {"type": ["integer", "null"]},
+        "provider": {"type": ["string", "null"]},
+        "requested_tier": {"maximum": 6, "minimum": 1, "type": "integer"}
+      },
+      "required": [
+        "base_url",
+        "model",
+        "provider",
+        "requested_tier",
+        "catalog_url",
+        "authentication",
+        "max_sweep_models",
+        "perf_samples"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "report_version",
+    "suite_version",
+    "contract_version",
+    "generated_at",
+    "target",
+    "summary",
+    "checks",
+    "performance",
+    "submission"
+  ],
+  "title": "TrustedRouter provider-check report",
+  "type": "object"
+}

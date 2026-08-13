@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --python "${{ matrix.python-version }}" ruff check .
+      # Also proves the contract.py format exclusion is still in place: without
+      # it the formatter rewrites the vendored copies and fidelity silently dies.
+      - run: uv run --python "${{ matrix.python-version }}" ruff format --check .
+      - run: uv run --python "${{ matrix.python-version }}" mypy src tests
+      - run: uv run --python "${{ matrix.python-version }}" pytest -q
+
+  wheel:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: Smoke-test the installed wheel and packaged snapshot
+        run: |
+          smoke_env="$(mktemp -d)"
+          trap 'rm -rf "$smoke_env"' EXIT
+          uv venv "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" dist/*.whl
+          (
+            cd "$smoke_env"
+            "$smoke_env/bin/python" -c 'import sys; from pathlib import Path; import tr_provider_check; from tr_provider_check.snapshot import load_contract; package_root = Path(tr_provider_check.__file__).resolve().parent; assert package_root.is_relative_to(Path(sys.prefix).resolve()); assert (package_root / "py.typed").is_file(); assert load_contract()["contract_version"]'
+            "$smoke_env/bin/trustedrouter-provider-check" --version
+          )

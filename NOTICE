@@ -1,0 +1,22 @@
+trustedrouter-provider-check
+Copyright 2026 Lore Hex Corp
+
+This product is part of TrustedRouter (https://trustedrouter.com),
+developed by Lore-Hex (https://github.com/Lore-Hex).
+
+Licensed under the Apache License, Version 2.0 (see LICENSE). Providers are
+meant to run this against their own inference endpoints, including in
+production, so it carries the same permissive license as the other
+TrustedRouter tooling published for third parties to run.
+
+src/tr_provider_check/contract.py vendors constants and pure functions from
+TrustedRouter's control plane (Lore-Hex/quill-router), relicensed here under
+Apache-2.0 by the copyright holder. Provenance comments name each upstream
+path; the exported snapshot's content hash identifies the production contract.
+
+quill-router contains a parity gate that compares its production export with a
+provider-check checkout. Before this repository is published and automatic CI
+wiring lands, run it from quill-router with:
+
+    PROVIDER_CHECK_REPO_PATH=<checkout> uv run --no-sync pytest \
+      tests/test_provider_check_contract_parity.py -q

@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trustedrouter-provider-check"
+dynamic = ["version"]
+description = "Provider-side compatibility checker for TrustedRouter's gateway wire contract"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Lore Hex Corp" }]
+keywords = [
+    "ai-inference",
+    "conformance-testing",
+    "llm",
+    "openai-compatible",
+    "trustedrouter",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "httpx[http2]",
+    "jsonschema>=4.23",
+]
+
+[project.urls]
+Homepage = "https://trustedrouter.com"
+Repository = "https://github.com/Lore-Hex/trustedrouter-provider-check"
+Issues = "https://github.com/Lore-Hex/trustedrouter-provider-check/issues"
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "types-jsonschema",
+]
+
+[project.scripts]
+trustedrouter-provider-check = "tr_provider_check.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tr_provider_check"]
+# Keep exactly one snapshot: this package-data path is also the repository sync target.
+include = [
+    "src/tr_provider_check/data/contract_snapshot.json",
+    "src/tr_provider_check/data/catalog.v2.schema.json",
+    "src/tr_provider_check/data/provider-report.schema.json",
+    "src/tr_provider_check/py.typed",
+]
+
+[tool.hatch.version]
+path = "src/tr_provider_check/__init__.py"
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Make the intentionally compact lint policy explicit. The elapsed-time cast in
+# contract.py is copied from production; expanding into RUF rules must be done
+# without changing that vendored body.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# contract.py holds byte-for-byte copies of production functions, and a hash
+# test fails if a single character moves. The formatter does not know that:
+# running it here rewrites nine of those copies into equivalent-but-different
+# text and breaks the guarantee the package exists to provide. Excluding the
+# file makes `ruff format` safe to run, so a contributor's muscle memory cannot
+# quietly cost the suite its fidelity to production.
+exclude = ["src/tr_provider_check/contract.py"]
