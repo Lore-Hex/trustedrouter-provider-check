@@ -273,21 +273,37 @@ async def run_streaming_checks(
     ]
 
     framing_ok, data_line_count, invalid_data_lines = _wire_framing(wire, content_type)
+    # Recording no bytes at all is a failure to OBSERVE, not evidence of bad
+    # framing. Nebius returned 200 with text/event-stream and a well-formed
+    # 1296-byte body that a direct read reproduces, yet nothing reached the
+    # recorder -- and the provider was reported as emitting unreadable SSE.
+    # Never conclude a provider's wire is wrong from bytes we failed to capture.
+    wire_unobserved = not wire
     results.append(
         check_result(
             id="stream.sse-framing",
             tier=4,
-            status="pass" if framing_ok else "fail",
+            status=("pass" if framing_ok else "warn" if wire_unobserved else "fail"),
             assertion="the HTTP 200 body uses enclave-readable SSE data framing",
             measured={
                 "content_type": content_type,
                 "data_line_count": data_line_count,
                 "invalid_data_line_count": len(invalid_data_lines),
+                "wire_unobserved": wire_unobserved,
+                **(
+                    {
+                        "reason": "no response bytes reached the recorder, so "
+                        "framing could not be observed; this is not evidence "
+                        "the provider's framing is wrong"
+                    }
+                    if wire_unobserved
+                    else {}
+                ),
             },
             contract_ref="enclave-go/internal/llm/stream_translate.go (accepts only lines prefixed 'data: ')",
             marketplace_bullet="Streaming responses use text/event-stream and enclave-readable data lines.",
             remediation="For stream=true, return Content-Type: text/event-stream and frame each JSON event exactly as 'data: <json>\\n\\n'. Do not return a plain JSON 200 body.",
-            error_type=None if framing_ok else "empty_stream",
+            error_type=None if framing_ok or wire_unobserved else "empty_stream",
         )
     )
 

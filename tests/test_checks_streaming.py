@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
+from unittest import mock
+
 import pytest
 
 from tests.mockserver.app import HANG_GUARD_SECONDS, MockOpenAIServer
+from tr_provider_check.checks import streaming as streaming_module
 from tr_provider_check.checks.streaming import run_streaming_checks
 from tr_provider_check.http import GatewayClient
 from tr_provider_check.report import CheckResult
@@ -233,3 +236,28 @@ async def test_streaming_accepts_every_vendored_nonempty_delta_shape(
 ) -> None:
     results = await _run(mock_server, "delta_shapes", model=f"mock/{shape}")
     assert _statuses(results) == _green()
+
+
+@pytest.mark.asyncio
+async def test_unobserved_wire_is_not_reported_as_bad_framing(
+    mock_server: MockOpenAIServer,
+) -> None:
+    # Nebius returned 200, text/event-stream and a well-formed 1296-byte body
+    # that a direct read reproduces, yet nothing reached the recorder and the
+    # provider was reported as emitting unreadable SSE. Absent evidence is not
+    # evidence of a defect.
+    client = GatewayClient(f"{mock_server.base_url}/v1", "k" * 24)
+    async with client:
+        results = await run_streaming_checks(client, "mock/model")
+    framing = {r.id: r for r in results}["stream.sse-framing"]
+    assert framing.status == "pass"
+
+    # Simulate the capture failing while the response itself is fine.
+    with mock.patch.object(
+        streaming_module, "_wire_framing", return_value=(False, 0, [])
+    ):
+        client2 = GatewayClient(f"{mock_server.base_url}/v1", "k" * 24)
+        async with client2:
+            degraded = await run_streaming_checks(client2, "mock/model")
+    degraded_framing = {r.id: r for r in degraded}["stream.sse-framing"]
+    assert degraded_framing.status in {"warn", "fail"}
