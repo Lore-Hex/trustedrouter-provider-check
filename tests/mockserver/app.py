@@ -46,6 +46,7 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
         "models_without_object_envelope": "Native discovery omits the top-level object:list envelope (pearlresearch.ai).",
         "models_without_data_array": "Native discovery returns an object with no data[] array at all.",
         "capability_probe_backend_down": "A capability probe hits a 502 rather than a parameter refusal.",
+        "structured_json_in_content_prose_in_reasoning": "Exact JSON in content while reasoning_content holds prose (Fireworks glm-5p2).",
     },
     "request_rejected_before_completion": {
         "queue_then_429": "Queueing consumes the probe budget before capacity rejects.",
@@ -610,6 +611,35 @@ class _MockHandler(BaseHTTPRequestHandler):
                         "type": "invalid_request",
                         "message": "tools unsupported",
                     }
+                },
+            )
+            return
+        if mode == "structured_json_in_content_prose_in_reasoning" and (
+            "response_format" in payload
+        ):
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "id": "chatcmpl-mock",
+                    "object": "chat.completion",
+                    "created": 1_700_000_000,
+                    "model": payload.get("model", "mock/model"),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": '{"city": "Paris", "temperature_c": 15}',
+                                "reasoning_content": "1. Analyze the request. 2. Emit JSON.",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 12,
+                        "total_tokens": 16,
+                    },
                 },
             )
             return

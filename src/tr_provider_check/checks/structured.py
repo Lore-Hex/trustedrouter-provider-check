@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from jsonschema import Draft202012Validator, ValidationError
 
-from tr_provider_check.contract import _chat_text, _response_error
+from tr_provider_check.contract import _response_error
 from tr_provider_check.http import GatewayClient, probe_inconclusive
 from tr_provider_check.report import CheckResult, CheckStatus, check_result
 
@@ -21,6 +21,35 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
     "required": ["answer", "count"],
     "additionalProperties": False,
 }
+
+
+def _structured_answer_text(response: httpx.Response) -> str:
+    """Return only the assistant's content, ignoring any reasoning channel."""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    # Content-parts form: concatenate only the text parts.
+    if isinstance(content, list):
+        parts = [
+            part.get("text")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ]
+        return "".join(part for part in parts if part)
+    return ""
 
 
 def _skip(check_id: str, assertion: str) -> CheckResult:
@@ -108,7 +137,13 @@ async def _run_response_format(
             error_message=error_message,
         )
 
-    text = _chat_text(response)
+    # NOT _chat_text: that extractor deliberately falls back to
+    # reasoning_content so a reasoning model's PONG is still found. A
+    # structured answer is the assistant's content, never its chain of
+    # thought. Parsing the fallback failed Fireworks and an applicant whose
+    # content held exact JSON while reasoning_content held prose -- both
+    # reported identically as malformed JSON at the same byte offset.
+    text = _structured_answer_text(response)
     parse_error: str | None = None
     validation_error: str | None = None
     parsed: object = None

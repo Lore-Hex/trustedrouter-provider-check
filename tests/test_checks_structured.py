@@ -141,3 +141,21 @@ async def test_backend_outage_during_probe_is_inconclusive_not_a_rejection(
     ]
     assert refused.measured["inconclusive"] is False
     assert "rejected" in refused.measured["reason"]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_prose_is_not_parsed_as_the_structured_answer(
+    mock_server: MockOpenAIServer,
+) -> None:
+    # Fireworks (glm-5p2) and an applicant both returned exact JSON in
+    # content while reasoning_content held prose. Parsing the reasoning
+    # fallback reported both conformant providers as emitting malformed JSON.
+    probes = await _run(mock_server, "structured_json_in_content_prose_in_reasoning")
+
+    assert probes["structured.json-object"].status == "pass"
+    assert probes["structured.json-object"].measured["body_parsed_as_json"] is True
+
+    # Negative control: genuinely malformed content still fails, so dropping
+    # the reasoning channel did not make the check unfalsifiable.
+    broken = await _run(mock_server, "structured_non_json")
+    assert broken["structured.json-object"].status == "fail"
