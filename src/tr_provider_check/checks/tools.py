@@ -240,15 +240,30 @@ async def run_parallel_tool_delta_check(
         status: CheckStatus = "skip"
         reason = "the model did not declare tools and emitted no tool-call deltas"
     else:
-        ok = (
-            call_count >= 2
-            and missing_index_count == 0
+        # The enclave breaks on a delta missing index, or on function.name
+        # arriving after the first delta for an index -- not on how MANY calls
+        # a model chose to make. Cerebras/gpt-oss-120b answered the forced
+        # prompt with one perfectly-formed call; failing that would fail a
+        # provider for a model's decision, which is not a contract defect.
+        shape_ok = (
+            missing_index_count == 0
             and invalid_delta_count == 0
             and not late_name_indices
             and not argument_errors
         )
-        status = "pass" if ok else "fail"
-        reason = None
+        if not shape_ok:
+            status = "fail"
+            reason = None
+        elif call_count >= 2:
+            status = "pass"
+            reason = None
+        else:
+            status = "warn"
+            reason = (
+                "every delta was well formed, but the model emitted "
+                f"{call_count} tool call(s), so parallel-call correlation was "
+                "not exercised"
+            )
 
     result = check_result(
         id="tools.parallel-deltas",

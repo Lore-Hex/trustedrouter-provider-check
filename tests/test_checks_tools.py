@@ -85,7 +85,6 @@ async def test_parallel_tools_and_empty_string_round_trip_control_are_green(
         ("tool_deltas_missing_index", "missing_index_count"),
         ("tool_name_late", "late_name_indices"),
         ("tool_arguments_invalid_json", "argument_errors"),
-        ("tool_single_call", "tool_call_count"),
     ],
 )
 async def test_parallel_tool_delta_mutations_fail_but_control_passes(
@@ -163,3 +162,28 @@ async def test_declared_false_tools_skip_without_a_billed_completion(
     assert rows["tools.parallel-deltas"].status == "skip"
     assert rows["tools.round-trip"].status == "skip"
     assert mock_server.request_log == []
+
+
+@pytest.mark.asyncio
+async def test_single_well_formed_tool_call_warns_rather_than_fails(
+    mock_server: MockOpenAIServer,
+) -> None:
+    # Cerebras/gpt-oss-120b answered the forced-parallel prompt with ONE
+    # perfectly-formed call. The enclave breaks on a missing index or a late
+    # function.name, never on how many calls a model chose to make, so this
+    # cannot be a conformance failure.
+    single = _by_id(await _run(mock_server, "tool_single_call"))[
+        "tools.parallel-deltas"
+    ]
+
+    assert single.status == "warn"
+    assert single.measured["tool_call_count"] == 1
+    assert single.measured["missing_index_count"] == 0
+    assert not single.measured["late_name_indices"]
+    assert "not exercised" in single.measured["reason"]
+
+    # Negative control: a malformed delta at the same call count still fails.
+    malformed = _by_id(await _run(mock_server, "tool_deltas_missing_index"))[
+        "tools.parallel-deltas"
+    ]
+    assert malformed.status == "fail"
