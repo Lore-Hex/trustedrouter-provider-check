@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from tr_provider_check.checks.assertions import assertion_for
 from tr_provider_check.checks.catalog import CatalogEvidence
 from tr_provider_check.contract import (
     ProviderBenchmarkSample,
@@ -287,10 +288,7 @@ async def run_performance_checks(
         id="perf.production-benchmark",
         tier=6,
         status=status,
-        assertion=(
-            "advisory samples expose TTFB, TTFT, and effective throughput using "
-            "production's request-start denominator and vendored leaderboard score"
-        ),
+        assertion=assertion_for("perf.production-benchmark"),
         measured={
             "requested_samples": sample_count,
             "successful_samples": successful,

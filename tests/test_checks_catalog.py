@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from tests.mockserver.app import HANG_GUARD_SECONDS, MockOpenAIServer
 from tr_provider_check.checks.catalog import (
     CatalogEvidence,
     _vendored_schema,
+    load_catalog_schema,
     run_catalog_checks,
 )
 from tr_provider_check.http import GatewayClient
@@ -109,10 +111,8 @@ async def test_declared_catalog_rejects_native_id_syntax_only_in_declaration(
 async def test_models_without_an_object_envelope_still_yield_ids(
     mock_server: MockOpenAIServer,
 ) -> None:
-    # pearlresearch.ai returns {"data": [...], "pricing_source": ...} with no
-    # top-level "object": "list". The ids are present and the gateway never
-    # reads that envelope field, so discovery must succeed rather than
-    # reporting a working endpoint as having a broken catalog.
+    # This real-world shape has readable data[] ids but no top-level
+    # object:list. The gateway never reads that envelope field.
     results, models, _ = await _run(mock_server, "models_without_object_envelope")
 
     assert models == ["mock/model"]
@@ -145,3 +145,98 @@ async def test_bare_array_models_response_still_yields_ids(
     assert models == ["mock/model"]
     discovery = next(r for r in results if r.id == "catalog.native-model-discovery")
     assert discovery.status == "pass"
+
+
+@pytest.mark.asyncio
+async def test_transient_models_failure_is_inconclusive_not_unsupported(
+    mock_server: MockOpenAIServer,
+) -> None:
+    # A 429/5xx on /models is a capacity blip. Failing it also empties the id
+    # list, so every later tier skips and the report says nothing about an
+    # otherwise healthy endpoint.
+    results, models, _ = await _run(mock_server, "models_transient_503")
+    discovery = next(r for r in results if r.id == "catalog.native-model-discovery")
+
+    assert discovery.status == "warn"
+    assert models == []
+
+    # Negative control: a 200 with no readable ids is still a hard failure.
+    results2, _models2, _ = await _run(mock_server, "models_without_data_array")
+    assert (
+        next(r for r in results2 if r.id == "catalog.native-model-discovery").status
+        == "fail"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected_error"),
+    [
+        ("models_non_200", "models endpoint was not HTTP 200"),
+        ("models_non_json", "models endpoint was not JSON"),
+        ("models_duplicate_rows", "native model ids must be unique"),
+    ],
+)
+async def test_models_permanent_http_and_malformed_payloads_fail(
+    mock_server: MockOpenAIServer,
+    mode: str,
+    expected_error: str,
+) -> None:
+    results, models, _ = await _run(mock_server, mode)
+    discovery = next(r for r in results if r.id == "catalog.native-model-discovery")
+
+    assert discovery.status == "fail"
+    assert discovery.measured["error"] == expected_error
+    assert models == []
+
+
+@pytest.mark.asyncio
+async def test_one_malformed_model_row_does_not_discard_readable_ids(
+    mock_server: MockOpenAIServer,
+) -> None:
+    results, models, _ = await _run(mock_server, "models_malformed_rows")
+    discovery = next(r for r in results if r.id == "catalog.native-model-discovery")
+
+    assert discovery.status == "pass"
+    assert models == ["mock/model"]
+    assert discovery.measured["unreadable_row_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_declared_catalog_fetch_failure_warns_validity_unknown(
+    mock_server: MockOpenAIServer,
+) -> None:
+    results, _, evidence = await _run(
+        mock_server, "conforming", catalog_mode="catalog_fetch_503"
+    )
+    declared = next(r for r in results if r.id == "catalog.declared-v2")
+
+    assert declared.status == "warn"
+    assert declared.measured["reason"] == "catalog URL unreachable; validity unknown"
+    assert evidence.declared_models == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_published_schema_falls_back_to_vendored_copy() -> None:
+    def malformed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, json={"type": 42})
+
+    schema, source = await load_catalog_schema(transport=httpx.MockTransport(malformed))
+
+    assert source == "vendored-offline-fallback"
+    assert schema == _vendored_schema()
+
+
+def test_catalog_evidence_identifies_only_declared_chat_serving_ids() -> None:
+    evidence = CatalogEvidence(
+        declared_models=[
+            {
+                "id": "owner/chat",
+                "type": "chat",
+                "endpoints": ["chat/completions"],
+            },
+            {"id": "owner/embed", "type": "embedding", "endpoints": []},
+        ]
+    )
+
+    assert evidence.declared_chat_model_ids(["chat", "embed", "other"]) == {"chat"}

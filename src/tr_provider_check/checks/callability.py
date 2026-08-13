@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Any
 
 import httpx
 
+from tr_provider_check.checks.assertions import assertion_for
 from tr_provider_check.contract import PONG_PROMPT, _classify, _response_error
 from tr_provider_check.http import GatewayClient
 from tr_provider_check.report import CheckResult, CheckStatus, check_result
@@ -31,8 +32,8 @@ async def run_callability_checks(
     delay_seconds: float = 0.1,
     sleep: Sleep = asyncio.sleep,
     max_models: int = DEFAULT_MAX_SWEEP_MODELS,
-    declared_chat_models: bool = False,
-) -> list[CheckResult]:
+    declared_chat_models: Collection[str] = (),
+) -> tuple[list[CheckResult], list[str]]:
     """Sweep models serially using ``llm/byok.go``'s chat route and fields.
 
     The DEAD/FLAKY decision itself is the byte-vendored production
@@ -40,19 +41,21 @@ async def run_callability_checks(
     mirrors that script and avoids turning discovery into a rate-limit burst.
     """
 
+    if max_models < 0:
+        raise ValueError("max_models must be non-negative")
     if not models:
         return [
             check_result(
                 id="callability.advertised-models",
                 tier=2,
                 status="skip",
-                assertion="every advertised native model is callable",
+                assertion=assertion_for("callability.advertised-models"),
                 measured={"reason": "native model discovery did not produce models"},
                 contract_ref="enclave-go/internal/llm/byok.go; scripts/classify_provider_routes.py",
                 marketplace_bullet="Every advertised model has a live chat/completions route.",
                 remediation="Fix /v1/models discovery first, then rerun the callability sweep.",
             )
-        ]
+        ], []
 
     advertised = list(models)
     swept = advertised[:max_models] if max_models > 0 else advertised
@@ -97,8 +100,12 @@ async def run_callability_checks(
 
     dead_count = sum(row["verdict"] == "dead" for row in observations)
     flaky_count = sum(row["verdict"] == "flaky" for row in observations)
+    declared_dead_count = sum(
+        row["verdict"] == "dead" and row["model"] in declared_chat_models
+        for row in observations
+    )
     status: CheckStatus
-    if dead_count and declared_chat_models:
+    if declared_dead_count:
         # The provider declared these ids as chat-served, so a dead route is a
         # broken promise.
         status = "fail"
@@ -112,22 +119,21 @@ async def run_callability_checks(
     else:
         status = "pass"
     error_type, error_status, error_message = attribution_error
+    callable_models = [row["model"] for row in observations if row["verdict"] == "ok"]
+
     return [
         check_result(
             id="callability.advertised-models",
             tier=2,
             status=status,
-            assertion=(
-                "every advertised native model is callable; permanent route failures are DEAD and transient health failures are FLAKY"
-                if not not_swept
-                else f"the first {len(swept)} of {len(advertised)} advertised native models are callable; {len(not_swept)} were not swept"
-            ),
+            assertion=assertion_for("callability.advertised-models"),
             measured={
                 "advertised_count": len(advertised),
                 "swept_count": len(swept),
                 "not_swept_count": len(not_swept),
                 "not_swept": not_swept,
                 "dead_count": dead_count,
+                "declared_dead_count": declared_dead_count,
                 "flaky_count": flaky_count,
                 "models": observations,
             },
@@ -145,4 +151,4 @@ async def run_callability_checks(
             error_status=error_status,
             error_message=error_message,
         )
-    ]
+    ], callable_models

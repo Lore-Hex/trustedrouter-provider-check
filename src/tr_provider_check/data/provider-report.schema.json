@@ -1,5 +1,5 @@
 {
-  "$id": "https://trustedrouter.com/providers/provider-check/report.v1.schema.json",
+  "$id": "https://raw.githubusercontent.com/Lore-Hex/trustedrouter-provider-check/main/src/tr_provider_check/data/provider-report.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -25,7 +25,35 @@
               "unknown"
             ]
           },
-          "id": {"minLength": 1, "type": "string"},
+          "id": {
+            "enum": [
+              "catalog.native-model-discovery",
+              "catalog.declared-v2",
+              "callability.advertised-models",
+              "chat.unavailable",
+              "chat.non-empty",
+              "chat.pong",
+              "chat.usage",
+              "chat.model",
+              "chat.finish-reason",
+              "chat.temperature-zero",
+              "chat.forwarded-fields",
+              "chat.max-token-spelling",
+              "stream.unavailable",
+              "stream.response-status",
+              "stream.sse-framing",
+              "stream.error-signaling",
+              "stream.done",
+              "stream.usage",
+              "stream.first-delta",
+              "stream.incremental-delivery",
+              "tools.parallel-deltas",
+              "tools.round-trip",
+              "structured.json-object",
+              "structured.json-schema",
+              "perf.production-benchmark"
+            ]
+          },
           "marketplace_bullet": {"minLength": 1, "type": "string"},
           "measured": {"type": "object"},
           "owner": {
@@ -121,7 +149,7 @@
         },
         "base_url": {"minLength": 1, "type": "string"},
         "catalog_url": {"type": ["string", "null"]},
-        "max_sweep_models": {"type": ["integer", "null"]},
+        "max_sweep_models": {"minimum": 0, "type": ["integer", "null"]},
         "model": {"type": ["string", "null"]},
         "perf_samples": {"type": ["integer", "null"]},
         "provider": {"type": ["string", "null"]},

@@ -8,15 +8,16 @@ from typing import Any
 import httpx
 from jsonschema import Draft202012Validator, ValidationError
 
+from tr_provider_check.checks.assertions import assertion_for
 from tr_provider_check.contract import _response_error
-from tr_provider_check.http import GatewayClient, probe_inconclusive
+from tr_provider_check.http import GatewayClient, probe_verdict
 from tr_provider_check.report import CheckResult, CheckStatus, check_result
 
 _OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "answer": {"type": "string", "const": "PONG"},
-        "count": {"type": "integer", "const": 2},
+        "answer": {"type": "string"},
+        "count": {"type": "integer"},
     },
     "required": ["answer", "count"],
     "additionalProperties": False,
@@ -86,32 +87,29 @@ async def _run_response_format(
             extra={"response_format": response_format},
         )
     except httpx.HTTPError as error:
-        transport_status: CheckStatus = "warn" if declared is True else "skip"
+        transport_status, reason = probe_verdict(None, declared=declared is True)
         return check_result(
             id=check_id,
             tier=5,
             status=transport_status,
             assertion=assertion,
             measured={
-                "reason": "response_format request failed",
                 "capability_declared": declared,
                 "error": error.__class__.__name__,
+                "inconclusive": True,
+                "reason": reason,
             },
             contract_ref="enclave-go/internal/llm/byok.go (ResponseFormat passthrough)",
             marketplace_bullet="Structured response formats are accepted by the selected route.",
             remediation="Configure the selected route to accept the forwarded response_format field.",
-            error_type="invalid_request",
+            error_type=error.__class__.__name__,
             error_message=str(error),
         )
 
     if response.status_code != 200:
         error_type, error_status, error_message = _response_error(response)
-        # A 5xx/429 means the backend never read the request, so nothing was
-        # learned about response_format support. Saying it was "rejected"
-        # states a cause the evidence does not support.
-        inconclusive = probe_inconclusive(response.status_code)
-        rejection_status: CheckStatus = (
-            "warn" if inconclusive or declared is True else "skip"
+        rejection_status, reason = probe_verdict(
+            response.status_code, declared=declared is True
         )
         return check_result(
             id=check_id,
@@ -119,13 +117,8 @@ async def _run_response_format(
             status=rejection_status,
             assertion=assertion,
             measured={
-                "reason": (
-                    "backend unavailable during the probe; response_format "
-                    "support is unknown"
-                    if inconclusive
-                    else "response_format was rejected"
-                ),
-                "inconclusive": inconclusive,
+                "reason": reason,
+                "inconclusive": rejection_status == "warn",
                 "capability_declared": declared,
                 "http_status": response.status_code,
             },
@@ -140,8 +133,8 @@ async def _run_response_format(
     # NOT _chat_text: that extractor deliberately falls back to
     # reasoning_content so a reasoning model's PONG is still found. A
     # structured answer is the assistant's content, never its chain of
-    # thought. Parsing the fallback failed Fireworks and an applicant whose
-    # content held exact JSON while reasoning_content held prose -- both
+    # thought. Parsing the fallback failed endpoints whose content held exact
+    # JSON while reasoning_content held prose; both were
     # reported identically as malformed JSON at the same byte offset.
     text = _structured_answer_text(response)
     parse_error: str | None = None
@@ -157,17 +150,24 @@ async def _run_response_format(
         except ValidationError as error:
             validation_error = error.message
     ok = parse_error is None and validation_error is None
+    result_status: CheckStatus = (
+        "pass" if ok else "fail" if declared is True else "skip"
+    )
     return check_result(
         id=check_id,
         tier=5,
-        status="pass" if ok else "fail",
+        status=result_status,
         assertion=assertion,
         measured={
             "capability_declared": declared,
-            "capability_discovered": True,
+            "capability_discovered": ok,
             "http_status": response.status_code,
             "body_parsed_as_json": parse_error is None,
-            "schema_valid": None if not validate_schema else validation_error is None,
+            "schema_valid": (
+                None
+                if not validate_schema or parse_error is not None
+                else validation_error is None
+            ),
             "parse_error": parse_error,
             "validation_error": validation_error,
         },
@@ -177,9 +177,9 @@ async def _run_response_format(
             "Once response_format is accepted, return a JSON value that conforms "
             "to the requested mode and supplied JSON Schema."
         ),
-        error_type="stream_error" if not ok else None,
+        error_type="stream_error" if result_status == "fail" else None,
         error_message="accepted response_format returned non-conforming output"
-        if not ok
+        if result_status == "fail"
         else None,
     )
 
@@ -192,9 +192,7 @@ async def run_json_object_check(
 ) -> CheckResult:
     """Check ``response_format`` forwarding from ``llm/byok.go`` as JSON object."""
 
-    assertion = (
-        "response_format type=json_object returns assistant content that parses as JSON"
-    )
+    assertion = assertion_for("structured.json-object")
     if declared is False:
         return _skip("structured.json-object", assertion)
     return await _run_response_format(
@@ -216,7 +214,7 @@ async def run_json_schema_check(
 ) -> CheckResult:
     """Check ``response_format`` forwarding from ``llm/byok.go`` as JSON Schema."""
 
-    assertion = "response_format type=json_schema returns JSON that validates against the supplied schema"
+    assertion = assertion_for("structured.json-schema")
     if declared is False:
         return _skip("structured.json-schema", assertion)
     return await _run_response_format(

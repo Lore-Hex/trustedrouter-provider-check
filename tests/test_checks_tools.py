@@ -5,10 +5,16 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import httpx
 import pytest
 
 from tests.mockserver.app import HANG_GUARD_SECONDS, MockOpenAIServer
-from tr_provider_check.checks.tools import run_tool_checks
+from tr_provider_check.checks.tools import (
+    _ToolTurn,
+    run_parallel_tool_delta_check,
+    run_tool_checks,
+    run_tool_round_trip_check,
+)
 from tr_provider_check.http import GatewayClient
 from tr_provider_check.report import CheckResult
 
@@ -187,3 +193,71 @@ async def test_single_well_formed_tool_call_warns_rather_than_fails(
         "tools.parallel-deltas"
     ]
     assert malformed.status == "fail"
+
+
+@pytest.mark.asyncio
+async def test_transient_tool_probe_and_round_trip_are_inconclusive(
+    mock_server: MockOpenAIServer,
+) -> None:
+    probe = _by_id(await _run(mock_server, "tools_probe_backend_down"))
+    mock_server.clear_requests()
+    replay = _by_id(await _run(mock_server, "tool_round_trip_backend_down"))
+
+    assert probe["tools.parallel-deltas"].status == "warn"
+    assert probe["tools.parallel-deltas"].measured["inconclusive"] is True
+    assert probe["tools.round-trip"].status == "skip"
+    assert replay["tools.parallel-deltas"].status == "pass"
+    assert replay["tools.round-trip"].status == "warn"
+    assert "unknown" in replay["tools.round-trip"].measured["reason"]
+
+
+@pytest.mark.asyncio
+async def test_round_trip_model_selected_tool_call_warns(
+    mock_server: MockOpenAIServer,
+) -> None:
+    rows = _by_id(await _run(mock_server, "tool_round_trip_calls_tool"))
+    result = rows["tools.round-trip"]
+
+    assert rows["tools.parallel-deltas"].status == "pass"
+    assert result.status == "warn"
+    assert result.measured["alternative_tool_call_count"] == 1
+    assert "model chose another tool call" in result.measured["reason"]
+
+
+@pytest.mark.asyncio
+async def test_tool_transport_errors_are_inconclusive() -> None:
+    def offline(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    async with GatewayClient(
+        "https://example.test/v1",
+        "test-key",
+        transport=httpx.MockTransport(offline),
+        sleep=no_delay,
+    ) as client:
+        parallel, turn = await run_parallel_tool_delta_check(
+            client, "mock/model", declared=True
+        )
+        replay = await run_tool_round_trip_check(
+            client,
+            "mock/model",
+            _ToolTurn(
+                [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {"name": "lookup_time", "arguments": "{}"},
+                    }
+                ]
+            ),
+            unavailable_reason="unused",
+        )
+
+    assert turn is None
+    assert parallel.status == "warn"
+    assert parallel.measured["inconclusive"] is True
+    assert replay.status == "warn"
+    assert "unknown" in replay.measured["reason"]

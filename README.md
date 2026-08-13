@@ -2,18 +2,17 @@
 
 `trustedrouter-provider-check` runs provider-side compatibility checks for the
 OpenAI-compatible HTTP contract consumed by TrustedRouter. It checks the
-catalog, every advertised native model, non-streaming chat semantics, and the
-streaming behavior that most often fails behind gateways and reverse proxies.
+catalog, a bounded billed sweep of advertised native models, non-streaming chat
+semantics, and the streaming behavior that most often fails behind gateways and
+reverse proxies.
 Opt-in Tiers 5–6 add tools, structured output, and advisory production-style
 performance sampling.
 
 The implementation vendors production contract functions and a content-hashed
 snapshot from TrustedRouter. The local test suite joins those functions to a
-configurable mock HTTP server. Tiers 1–4 have been exercised against OpenAI,
-z.ai GLM, DeepSeek, and Ollama during development; that is point-in-time test
-evidence, not certification. Tiers 5–6 are mock-verified against the inspected
-enclave contract but have not yet been verified in this repository against a
-live third-party provider.
+configurable mock HTTP server. The checks have also been exercised against nine
+live OpenAI-compatible endpoints during development; that is point-in-time test
+evidence, not certification. Tier 6 performance remains advisory.
 
 ## Running the checker
 
@@ -39,9 +38,10 @@ Available options:
 ```text
 --base-url URL       OpenAI-compatible API root; required for a check run
 --api-key KEY        Optional provider key; falls back to TR_PROVIDER_API_KEY
---model MODEL        Native model id for Tiers 3-6; defaults to the first /models id
+--model MODEL        Native model id for Tiers 3-6; defaults to the first tier-2 callable id
 --catalog-url URL    Public Provider Contract v2 declaration; omitted means skip
 --tier {1,2,3,4,5,6} Highest tier to run, including lower tiers; default 4
+--max-sweep-models N Cap Tier 2 at N billed completions; default 25; 0 sweeps all
 --perf-samples N     Billed Tier 6 completions; default 3
 --json OUT           Also write redacted JSON to OUT; use - for JSON on stdout
 ```
@@ -85,10 +85,10 @@ uv run trustedrouter-provider-check --print-contract-version
 | Tier | Checks | Result discipline |
 | --- | --- | --- |
 | 1 | Non-empty unique native IDs from `/models`; optional declared marketplace catalog against Catalog v2 and vendored exact-field/id/decimal rules | Invalid discovery or declaration is `fail`; an omitted `--catalog-url` is `skip`. The `owner/model` regex applies only to the declaration, never native engine IDs. |
-| 2 | Every discovered native model on `/chat/completions`, classified by the vendored production route classifier | Permanent DEAD routes are `fail`; transient FLAKY capacity/network results are `warn`. |
+| 2 | A billed, bounded subset of discovered native models on `/chat/completions` (`--max-sweep-models 0` selects all), classified by the vendored production route classifier | A DEAD route is `fail` only when a validated catalog declares that id as chat-served. Undeclared DEAD routes and transient FLAKY results are `warn`, because `/models` may include embeddings, speech, image, and other non-chat ids. |
 | 3 | Non-empty output, deterministic PONG, usage consistency, response model, finish reason, `temperature=0`, forwarded optional fields, and the provider/model-specific max-token spelling | Enclave-breaking request or response behavior is `fail`; tolerated metadata drift is `warn`. Content lists and `reasoning_content`/`reasoning` shapes are accepted. |
 | 4 | HTTP status before streaming, strict enclave-readable SSE framing, in-band errors, `[DONE]`, usage, first meaningful delta deadline, and incremental delivery | Silent/truncated output, missing usage, missed output budget, and errors embedded after HTTP 200 are `fail`. Missing `[DONE]` and whole-body buffering are `warn` because the enclave tolerates them but they remain risky. |
-| 5 | Forced parallel tool-call deltas, an empty-string assistant tool round-trip, `json_object`, and strict `json_schema` output | A capability declared `false` skips without a completion. An undeclared capability is probed and skips if it is not discoverable. Missing tool indices, late names, invalid concatenated arguments, or accepted-but-invalid structured output are `fail`; a declared structured field rejected by configuration is `warn`. |
+| 5 | Forced parallel tool-call deltas, an empty-string assistant tool round-trip, `json_object`, and strict `json_schema` output | A capability declared `false` skips without a completion. An undeclared capability that rejects or ignores the probe is not discovered and `skip`s; transient 429/5xx evidence `warn`s. A declared 4xx rejection or declared accepted-but-invalid output is `fail`. Well-formed single/alternate tool choices `warn` because they are model behavior. |
 | 6 | TTFB, TTFT, effective throughput, declared deadlines, vendored leaderboard projection, and a catalog-pricing spend estimate | Entirely advisory. Samples that do not report at least 128 output tokens warn but never change the Tier 1–4 conformance gate or process exit status. |
 
 Tier 4 passes the response through the vendored `_observe_provider_stream`.
@@ -114,6 +114,28 @@ inflating the result. The same observation is projected into vendored
 `model_deadlines_declared`. When a validated catalog price matches the model,
 the report includes both a cap estimate and an observed-token estimate.
 
+### Completion cost
+
+Every Tier 2 sweep entry and later probe is a real completion that may be
+billed by the provider. Let `A` be the number of advertised models, `M` be
+`--max-sweep-models`, `S = A` when `M=0` and otherwise `S = min(A, M)`, and `P`
+be `--perf-samples`. The table gives the maximum cumulative completions for a
+run through each tier; skips, rejected prerequisites, and models for which the
+gateway omits temperature can reduce the actual count.
+
+| Highest tier | Additional completions | Maximum cumulative completions |
+| --- | ---: | ---: |
+| 1 | 0 | 0 |
+| 2 | `S` short callability probes | `S` |
+| 3 | 7 chat probes | `S + 7` |
+| 4 | 1 streaming probe | `S + 8` |
+| 5 | 4 capability probes | `S + 12` |
+| 6 | `P` long performance probes | `S + 12 + P` |
+
+The default Tier 2 cap is 25. Setting `--max-sweep-models 0` removes the cap
+and can therefore bill one completion for every advertised id, including ids
+that are not chat routes. Negative values are rejected.
+
 ## JSON report
 
 `--json` writes a versioned object with `report_version`, `suite_version`,
@@ -129,6 +151,39 @@ all requested tiers, while `summary.conformance_gate` is computed only from
 Tiers 1–4. `summary.provider_owned_failures` counts hard failures attributed to
 the provider across the report; it is informational and does not redefine the
 gate.
+
+The schema enumerates every public check id. The `measured` object is
+check-specific; its stable keys are listed below. A branch may set only a
+subset, and `reason` is present when evidence is missing, inconclusive, or a
+prerequisite skipped.
+
+| Check id | `measured` keys |
+| --- | --- |
+| `catalog.native-model-discovery` | `http_status`, `model_count`, `model_ids`, `unreadable_row_count`, `error`, `reason` |
+| `catalog.declared-v2` | `schema_source`, `declared_model_count`, `error`, `reason` |
+| `callability.advertised-models` | `advertised_count`, `swept_count`, `not_swept_count`, `not_swept`, `dead_count`, `declared_dead_count`, `flaky_count`, `models`, `reason` |
+| `chat.unavailable` | `reason` |
+| `chat.non-empty` | `http_status`, `extracted_characters`, `reason` |
+| `chat.pong` | `http_status`, `matched`, `extracted_characters`, `error_type`, `reason` |
+| `chat.usage` | `input_tokens`, `output_tokens`, `total_tokens`, `reason` |
+| `chat.model` | `requested_model`, `response_model`, `reason` |
+| `chat.finish-reason` | `finish_reason`, `reason` |
+| `chat.temperature-zero` | `http_status`, `inconclusive`, `reason` |
+| `chat.forwarded-fields` | `fields` |
+| `chat.max-token-spelling` | `field`, `http_status`, `reason` |
+| `stream.unavailable` | `reason` |
+| `stream.response-status` | `http_status`, `route_verdict`, `error_type`, `reason` |
+| `stream.sse-framing` | `content_type`, `data_line_count`, `invalid_data_line_count`, `wire_unobserved`, `genuinely_empty`, `capture_failed`, `reason` |
+| `stream.error-signaling` | `http_status`, `error_before_stream`, `midstream_error_type`, `midstream_error_status` |
+| `stream.done` | `done_sentinel`, `reason` |
+| `stream.usage` | `input_tokens`, `output_tokens`, `reasoning_tokens`, `reason` |
+| `stream.first-delta` | `ttfb_milliseconds`, `first_delta_milliseconds`, `first_content_or_reasoning_delta_milliseconds`, `first_tool_delta_milliseconds`, `budget_milliseconds`, `budget_source`, `reason` |
+| `stream.incremental-delivery` | `first_delta_milliseconds`, `last_delta_milliseconds`, `elapsed_milliseconds`, `transport_chunk_count`, `reason` |
+| `tools.parallel-deltas` | `capability_declared`, `capability_discovered`, `http_status`, `inconclusive`, `tool_delta_count`, `tool_call_count`, `indices`, `missing_index_count`, `invalid_delta_count`, `late_name_indices`, `argument_errors`, `reason` |
+| `tools.round-trip` | `http_status`, `tool_call_count`, `assistant_content_type`, `assistant_content_length`, `completion_nonempty`, `alternative_tool_call_count`, `reason` |
+| `structured.json-object` | `capability_declared`, `capability_discovered`, `http_status`, `error`, `inconclusive`, `body_parsed_as_json`, `schema_valid`, `parse_error`, `validation_error`, `reason` |
+| `structured.json-schema` | `capability_declared`, `capability_discovered`, `http_status`, `error`, `inconclusive`, `body_parsed_as_json`, `schema_valid`, `parse_error`, `validation_error`, `reason` |
+| `perf.production-benchmark` | `requested_samples`, `successful_samples`, `insufficient_samples`, `leaderboard_eligible`, `first_token_deadline_ms`, `reason` |
 
 The mock corpus includes isolated modes for non-SSE HTTP 200 responses, invalid
 `data:` framing, missing `[DONE]`, ignored `include_usage`, early role plus late

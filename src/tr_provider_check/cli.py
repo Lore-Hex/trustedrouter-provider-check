@@ -27,6 +27,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=_PROG,
@@ -59,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        help="native model id for Tiers 3-6 (defaults to the first /models id)",
+        help="native model id for Tiers 3-6 (defaults to the first tier-2 callable id)",
     )
     parser.add_argument(
         "--catalog-url",
@@ -81,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-sweep-models",
-        type=int,
+        type=_non_negative_int,
         default=DEFAULT_MAX_SWEEP_MODELS,
         metavar="N",
         help=(

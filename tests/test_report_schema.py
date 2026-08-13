@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
+from tr_provider_check.checks.assertions import CHECK_ASSERTIONS
 from tr_provider_check.report import CheckStatus, check_result, report_document
 
 
@@ -31,8 +32,14 @@ def _target() -> dict[str, Any]:
 
 
 def _result(*, tier: int, status: CheckStatus):
+    check_id = {
+        1: "catalog.declared-v2",
+        4: "stream.sse-framing",
+        5: "structured.json-object",
+        6: "perf.production-benchmark",
+    }[tier]
     return check_result(
-        id=f"test.tier-{tier}-{status}",
+        id=check_id,
         tier=tier,
         status=status,
         assertion="the named test assertion holds",
@@ -87,3 +94,14 @@ def test_conformance_gate_uses_only_tiers_one_through_four() -> None:
     assert advisory_failure["summary"]["conformance_gate"] is True
     assert advisory_failure["summary"]["provider_owned_failures"] == 1
     assert conformance_failure["summary"]["conformance_gate"] is False
+
+
+def test_report_schema_enumerates_every_public_check_id() -> None:
+    schema = _schema()
+    ids = schema["properties"]["checks"]["items"]["properties"]["id"]["enum"]
+
+    assert set(ids) == set(CHECK_ASSERTIONS)
+    assert len(ids) == len(set(ids))
+    assert schema["$id"].startswith(
+        "https://raw.githubusercontent.com/Lore-Hex/trustedrouter-provider-check/"
+    )

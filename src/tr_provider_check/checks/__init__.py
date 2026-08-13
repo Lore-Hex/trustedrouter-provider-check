@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from tr_provider_check.checks.assertions import assertion_for
 from tr_provider_check.checks.callability import (
     DEFAULT_MAX_SWEEP_MODELS,
     run_callability_checks,
@@ -45,6 +46,8 @@ async def run_checks(
         raise ValueError("tier must be between 1 and 6")
     if perf_samples < 1:
         raise ValueError("perf_samples must be at least 1")
+    if max_sweep_models < 0:
+        raise ValueError("max_sweep_models must be non-negative")
 
     results: list[CheckResult] = []
     evidence = CatalogEvidence()
@@ -61,14 +64,27 @@ async def run_checks(
         )
         results.extend(catalog_results)
 
+        callable_models: list[str] = []
         if tier >= 2:
-            results.extend(
-                await run_callability_checks(
-                    client, native_models, max_models=max_sweep_models
-                )
+            callability_results, callable_models = await run_callability_checks(
+                client,
+                native_models,
+                max_models=max_sweep_models,
+                declared_chat_models=evidence.declared_chat_model_ids(native_models),
             )
+            results.extend(callability_results)
 
-        selected_model = model or (native_models[0] if native_models else None)
+        # Prefer a model tier 2 proved answers chat. /models[0] is not a chat
+        # model in general: OpenAI's first advertised id is an embeddings
+        # route, and grading a conformant endpoint on it produced five hard
+        # failures and a failed gate. The evidence was already in hand.
+        selected_model = model or (
+            callable_models[0]
+            if tier >= 2 and callable_models
+            else native_models[0]
+            if tier < 2 and native_models
+            else None
+        )
         if tier >= 3:
             if selected_model is None:
                 results.append(
@@ -76,7 +92,7 @@ async def run_checks(
                         id="chat.unavailable",
                         tier=3,
                         status="skip",
-                        assertion="Tier 3 has a selected native model to inspect",
+                        assertion=assertion_for("chat.unavailable"),
                         measured={
                             "reason": "no --model and native discovery returned no ids"
                         },
@@ -95,7 +111,7 @@ async def run_checks(
                         id="stream.unavailable",
                         tier=4,
                         status="skip",
-                        assertion="Tier 4 has a selected native model to inspect",
+                        assertion=assertion_for("stream.unavailable"),
                         measured={
                             "reason": "no --model and native discovery returned no ids"
                         },
@@ -105,29 +121,31 @@ async def run_checks(
                     )
                 )
             else:
-                results.extend(await run_streaming_checks(client, selected_model))
+                results.extend(
+                    await run_streaming_checks(
+                        client,
+                        selected_model,
+                        evidence=evidence,
+                    )
+                )
 
         if tier >= 5:
             if selected_model is None:
-                for check_id, assertion, contract_ref in (
+                for check_id, contract_ref in (
                     (
                         "tools.parallel-deltas",
-                        "a selected model is available for parallel tool-delta checks",
                         "enclave-go/internal/llm/stream_translate.go",
                     ),
                     (
                         "tools.round-trip",
-                        "a selected model is available for the empty-string tool round-trip",
                         "enclave-go/internal/llm/byok.go",
                     ),
                     (
                         "structured.json-object",
-                        "a selected model is available for json_object response_format",
                         "enclave-go/internal/llm/byok.go",
                     ),
                     (
                         "structured.json-schema",
-                        "a selected model is available for json_schema response_format",
                         "enclave-go/internal/llm/byok.go",
                     ),
                 ):
@@ -136,7 +154,7 @@ async def run_checks(
                             id=check_id,
                             tier=5,
                             status="skip",
-                            assertion=assertion,
+                            assertion=assertion_for(check_id),
                             measured={"reason": "no selected native model"},
                             contract_ref=contract_ref,
                             marketplace_bullet="Tier 5 capability checks have a selected model.",
@@ -168,7 +186,7 @@ async def run_checks(
                         id="perf.production-benchmark",
                         tier=6,
                         status="skip",
-                        assertion="a selected model is available for advisory performance samples",
+                        assertion=assertion_for("perf.production-benchmark"),
                         measured={"reason": "no selected native model"},
                         contract_ref="enclave-go/internal/llm/byok.go",
                         marketplace_bullet="Performance samples have a selected native model.",

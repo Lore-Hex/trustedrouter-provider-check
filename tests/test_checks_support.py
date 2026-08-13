@@ -12,10 +12,11 @@ import pytest
 from tests.mockserver.app import HANG_GUARD_SECONDS, MockOpenAIServer
 from tr_provider_check.contract import _StreamObservation, _StreamUsage
 from tr_provider_check.http import (
-    gateway_omits_temperature,
-    provider_for_base_url,
     GatewayClient,
+    gateway_omits_temperature,
     max_token_parameter,
+    probe_verdict,
+    provider_for_base_url,
     provider_for_model,
 )
 from tr_provider_check.report import (
@@ -215,6 +216,22 @@ def test_stream_samples_cover_success_empty_length_and_redacted_error() -> None:
     assert len(errored.error_message) == 300
 
 
+def test_short_placeholder_key_does_not_corrupt_a_sample() -> None:
+    sample = error_sample(
+        provider="mock",
+        model="max-token-spelling",
+        error_type="provider_error",
+        error_status=500,
+        error_message="max-token-spelling",
+        elapsed_milliseconds=1,
+        secrets=("x",),
+    )
+
+    assert sample.model == "max-token-spelling"
+    assert sample.error_message == "max-token-spelling"
+    assert "[REDACTED]" not in sample.error_message
+
+
 def _result(assertion: str, measured: dict[str, Any] | None = None) -> CheckResult:
     return check_result(
         id="chat.max-token-spelling",
@@ -255,6 +272,20 @@ def test_real_length_keys_are_still_redacted() -> None:
     assert "[REDACTED]" in rows[0]["measured"]["url"]
 
 
+@pytest.mark.parametrize("status_code", [None, 429, 500, 503])
+def test_shared_probe_ladder_warns_on_absent_or_transient_evidence(
+    status_code: int | None,
+) -> None:
+    assert probe_verdict(status_code, declared=True)[0] == "warn"
+    assert probe_verdict(status_code, declared=False)[0] == "warn"
+
+
+def test_shared_probe_ladder_respects_declarations_on_permanent_rejection() -> None:
+    assert probe_verdict(400, declared=True)[0] == "fail"
+    assert probe_verdict(400, declared=False)[0] == "skip"
+    assert probe_verdict(200, declared=True)[0] == "pass"
+
+
 def test_json_endpoints_are_not_asked_for_event_stream(
     mock_server: MockOpenAIServer,
 ) -> None:
@@ -278,6 +309,9 @@ def test_json_endpoints_are_not_asked_for_event_stream(
 
     assert by_path["/v1/models"] == "application/json"
     assert by_path["/v1/chat/completions"] == "text/event-stream"
+    assert {
+        record.headers.get("accept-encoding") for record in mock_server.request_log
+    } == {"gzip"}
 
 
 @pytest.mark.parametrize(

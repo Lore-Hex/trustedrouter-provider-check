@@ -285,7 +285,7 @@ def test_no_done_sentinel_really_omits_done(mock_server: MockOpenAIServer) -> No
     assert events[-1]["choices"][0]["finish_reason"] == "stop"
 
 
-def test_no_done_sentinel_is_the_only_successful_sse_mode_without_done(
+def test_only_named_missing_done_and_empty_body_modes_lack_done(
     mock_server: MockOpenAIServer,
 ) -> None:
     successful_sse_modes: set[str] = set()
@@ -310,7 +310,7 @@ def test_no_done_sentinel_is_the_only_successful_sse_mode_without_done(
         "non_sse_200",
         "queue_then_429",
     }
-    assert missing_done == ["no_done_sentinel"]
+    assert missing_done == ["no_done_sentinel", "empty_stream_200"]
 
 
 def test_ignores_include_usage_really_has_no_usage(

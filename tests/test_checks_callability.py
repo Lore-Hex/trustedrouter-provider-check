@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 
 import pytest
 
@@ -17,7 +18,7 @@ async def _run(
     mode: str,
     models: list[str],
     *,
-    declared_chat_models: bool = False,
+    declared_chat_models: Collection[str] = (),
 ) -> CheckResult:
     async def no_delay(_: float) -> None:
         return None
@@ -29,7 +30,7 @@ async def _run(
         sleep=no_delay,
     ) as client:
         async with asyncio.timeout(HANG_GUARD_SECONDS):
-            results = await run_callability_checks(
+            results, _callable = await run_callability_checks(
                 client,
                 models,
                 delay_seconds=0,
@@ -65,7 +66,7 @@ async def test_callability_rejects_dead_routes_without_rejecting_live_routes(
     model: str,
     http_status: int,
 ) -> None:
-    rejected = await _run(mock_server, mode, [model], declared_chat_models=True)
+    rejected = await _run(mock_server, mode, [model], declared_chat_models={model})
     undeclared = await _run(mock_server, mode, [model])
     accepted = await _run(mock_server, "conforming", ["mock/model"])
 
@@ -103,3 +104,16 @@ async def test_callability_skips_explicitly_when_discovery_is_empty(
     result = await _run(mock_server, "conforming", [])
     assert result.status == "skip"
     assert result.measured["reason"]
+
+
+@pytest.mark.asyncio
+async def test_callability_rejects_negative_sweep_limit(
+    mock_server: MockOpenAIServer,
+) -> None:
+    async with GatewayClient(f"{mock_server.base_url}/v1", "test-key") as client:
+        with pytest.raises(ValueError, match="non-negative"):
+            await run_callability_checks(
+                client,
+                ["mock/model"],
+                max_models=-1,
+            )

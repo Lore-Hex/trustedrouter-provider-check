@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-
-from unittest import mock
+from collections.abc import AsyncIterator
 
 import pytest
 
 from tests.mockserver.app import HANG_GUARD_SECONDS, MockOpenAIServer
+from tr_provider_check.checks.catalog import CatalogEvidence
 from tr_provider_check.checks import streaming as streaming_module
 from tr_provider_check.checks.streaming import run_streaming_checks
 from tr_provider_check.http import GatewayClient
@@ -241,26 +241,39 @@ async def test_streaming_accepts_every_vendored_nonempty_delta_shape(
 @pytest.mark.asyncio
 async def test_unobserved_wire_is_not_reported_as_bad_framing(
     mock_server: MockOpenAIServer,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Nebius returned 200, text/event-stream and a well-formed 1296-byte body
-    # that a direct read reproduces, yet nothing reached the recorder and the
-    # provider was reported as emitting unreadable SSE. Absent evidence is not
-    # evidence of a defect.
-    client = GatewayClient(f"{mock_server.base_url}/v1", "k" * 24)
-    async with client:
-        results = await run_streaming_checks(client, "mock/model")
-    framing = {r.id: r for r in results}["stream.sse-framing"]
-    assert framing.status == "pass"
+    class CapturelessStream(streaming_module._DecodedRecordingStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            async for chunk in self._decoded_response.aiter_bytes():
+                yield chunk
 
-    # Simulate the capture failing while the response itself is fine.
-    with mock.patch.object(
-        streaming_module, "_wire_framing", return_value=(False, 0, [])
+    monkeypatch.setattr(streaming_module, "_DecodedRecordingStream", CapturelessStream)
+    async with GatewayClient(f"{mock_server.base_url}/v1", "k" * 24) as client:
+        degraded = await run_streaming_checks(client, "mock/model")
+
+    framing = {r.id: r for r in degraded}["stream.sse-framing"]
+    assert framing.status == "warn"
+    assert framing.measured["capture_failed"] is True
+    assert framing.measured["genuinely_empty"] is False
+
+
+@pytest.mark.asyncio
+async def test_http_200_with_empty_body_fails_sse_framing(
+    mock_server: MockOpenAIServer,
+) -> None:
+    results = _statuses(await _run(mock_server, "empty_stream_200"))
+
+    expected = _green()
+    expected["stream.sse-framing"] = "fail"
+    for check_id in (
+        "stream.done",
+        "stream.usage",
+        "stream.first-delta",
+        "stream.incremental-delivery",
     ):
-        client2 = GatewayClient(f"{mock_server.base_url}/v1", "k" * 24)
-        async with client2:
-            degraded = await run_streaming_checks(client2, "mock/model")
-    degraded_framing = {r.id: r for r in degraded}["stream.sse-framing"]
-    assert degraded_framing.status in {"warn", "fail"}
+        expected[check_id] = "skip"
+    assert results == expected
 
 
 @pytest.mark.asyncio
@@ -279,3 +292,63 @@ async def test_gzipped_sse_is_read_not_reported_as_bad_framing(
     assert results["stream.sse-framing"].status == "pass"
     assert results["stream.sse-framing"].measured["data_line_count"] > 0
     assert results["stream.done"].status == "pass"
+    timing = results["stream.first-delta"].measured
+    assert timing["first_tool_delta_milliseconds"] is not None
+    assert timing["first_content_or_reasoning_delta_milliseconds"] is not None
+    assert (
+        timing["first_delta_milliseconds"]
+        == timing["first_tool_delta_milliseconds"]
+        < timing["first_content_or_reasoning_delta_milliseconds"]
+    )
+    assert results["stream.incremental-delivery"].status == "pass"
+    assert results["stream.incremental-delivery"].measured["transport_chunk_count"] > 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["deflated_sse", "brotli_sse"])
+async def test_unexpected_supported_content_encodings_are_decoded_once(
+    mock_server: MockOpenAIServer,
+    mode: str,
+) -> None:
+    results = _statuses(await _run(mock_server, mode))
+    assert results == _green()
+
+
+@pytest.mark.asyncio
+async def test_declared_first_token_budget_overrides_fallback(
+    mock_server: MockOpenAIServer,
+) -> None:
+    evidence = CatalogEvidence(
+        declared_models=[
+            {
+                "id": "mock/model",
+                "reliability": {"first_token_timeout_seconds": 1},
+            }
+        ]
+    )
+
+    clock_value = [-2.0]
+
+    def stepped_clock() -> float:
+        clock_value[0] += 2.0
+        return clock_value[0]
+
+    async with GatewayClient(
+        f"{mock_server.base_url}/v1",
+        "test-key",
+        headers={"X-Mock-Mode": "conforming"},
+    ) as client:
+        results = {
+            row.id: row
+            for row in await run_streaming_checks(
+                client,
+                "mock/model",
+                evidence=evidence,
+                clock=stepped_clock,
+            )
+        }
+
+    first_delta = results["stream.first-delta"]
+    assert first_delta.measured["budget_source"] == "declared"
+    assert first_delta.measured["budget_milliseconds"] == 5_000
+    assert first_delta.status == "fail"

@@ -145,3 +145,17 @@ async def test_chat_uses_max_completion_tokens_for_openai_reasoning_models(
     cap_bodies = [body for body in bodies if "max_completion_tokens" in body]
     assert len(cap_bodies) == 1
     assert "max_tokens" not in cap_bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_every_tier_three_429_is_inconclusive(
+    mock_server: MockOpenAIServer,
+) -> None:
+    statuses = _statuses(await _run(mock_server, "queue_then_429"))
+
+    assert "fail" not in statuses.values()
+    assert statuses["chat.pong"] == "warn"
+    assert statuses["chat.temperature-zero"] == "warn"
+    assert statuses["chat.forwarded-fields"] == "warn"
+    assert statuses["chat.max-token-spelling"] == "warn"
+    assert statuses["chat.non-empty"] == "skip"

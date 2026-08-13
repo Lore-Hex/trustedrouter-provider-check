@@ -77,13 +77,19 @@ def check_result(
 _MIN_REDACTABLE_SECRET = 8
 
 
+def redact_text(value: str, secrets: tuple[str, ...]) -> str:
+    """Redact credential-length literal values without corrupting short text."""
+
+    redacted = value
+    for secret in secrets:
+        if len(secret) >= _MIN_REDACTABLE_SECRET:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    return redacted
+
+
 def _redact(value: Any, secrets: tuple[str, ...]) -> Any:
     if isinstance(value, str):
-        redacted = value
-        for secret in secrets:
-            if len(secret) >= _MIN_REDACTABLE_SECRET:
-                redacted = redacted.replace(secret, "[REDACTED]")
-        return redacted
+        return redact_text(value, secrets)
     if isinstance(value, dict):
         return {str(key): _redact(item, secrets) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

@@ -245,6 +245,39 @@ def test_perf_samples_must_be_positive_with_default_as_control(
     )
 
 
+def test_max_sweep_models_rejects_negative_and_accepts_zero(
+    mock_server: MockOpenAIServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as invalid:
+        main(
+            [
+                "--base-url",
+                f"{mock_server.base_url}/v1",
+                "--tier",
+                "1",
+                "--max-sweep-models",
+                "-1",
+            ]
+        )
+    assert invalid.value.code == 2
+    assert "must be non-negative" in capsys.readouterr().err
+
+    assert (
+        main(
+            [
+                "--base-url",
+                f"{mock_server.base_url}/v1",
+                "--tier",
+                "1",
+                "--max-sweep-models",
+                "0",
+            ]
+        )
+        == 0
+    )
+
+
 def test_tier_six_wires_tier_five_and_configured_perf_samples(
     mock_server: MockOpenAIServer,
     capsys: pytest.CaptureFixture[str],

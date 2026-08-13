@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from importlib import resources
+from collections.abc import Iterable
 from typing import Any
 
 import httpx
 from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import SchemaError, ValidationError
 
+from tr_provider_check.checks.assertions import assertion_for
 from tr_provider_check.contract import (
     _CAPABILITY_FIELDS,
     _ERROR_CONTRACT_FIELDS,
@@ -23,7 +26,7 @@ from tr_provider_check.contract import (
     _TOP_LEVEL_V2_FIELDS,
     _decimal,
 )
-from tr_provider_check.http import GatewayClient
+from tr_provider_check.http import GatewayClient, probe_inconclusive, probe_verdict
 from tr_provider_check.report import CheckResult, check_result
 
 SCHEMA_URL = "https://trustedrouter.com/providers/marketplace/catalog.v2.schema.json"
@@ -35,6 +38,7 @@ class NativeModels:
     response_status: int | None
     error: str | None = None
     capabilities: dict[str, dict[str, bool]] = field(default_factory=dict)
+    unreadable_rows: int = 0
 
 
 @dataclass
@@ -86,6 +90,22 @@ class CatalogEvidence:
             return None
         value = matches[0].get("pricing")
         return value if isinstance(value, dict) else None
+
+    def declared_chat_model_ids(self, models: Iterable[str]) -> set[str]:
+        """Return native ids backed by a validated chat/completions declaration."""
+
+        declared: set[str] = set()
+        for model in models:
+            for row in self._declared_matches(model):
+                endpoints = row.get("endpoints")
+                if (
+                    row.get("type") == "chat"
+                    and isinstance(endpoints, list)
+                    and "chat/completions" in endpoints
+                ):
+                    declared.add(model)
+                    break
+        return declared
 
 
 def _exact_fields(value: object, expected: frozenset[str], label: str) -> None:
@@ -181,7 +201,7 @@ async def load_catalog_schema(
                 raise ValueError("schema root is not an object")
             Draft202012Validator.check_schema(payload)
             return payload, "published"
-    except (httpx.HTTPError, ValueError, TypeError):
+    except (httpx.HTTPError, SchemaError, ValueError, TypeError):
         return _vendored_schema(), "vendored-offline-fallback"
 
 
@@ -198,21 +218,25 @@ async def discover_native_models(client: GatewayClient) -> NativeModels:
     except httpx.HTTPError as error:
         return NativeModels([], None, error.__class__.__name__)
     if response.status_code != 200:
+        # A 429/5xx on /models is a capacity blip, not an unsupported route.
+        # Failing here also empties native.ids, so every later tier skips and
+        # the report says nothing about an otherwise healthy endpoint.
         return NativeModels(
-            [], response.status_code, "models endpoint was not HTTP 200"
+            [],
+            response.status_code,
+            "models endpoint was unavailable during discovery"
+            if probe_inconclusive(response.status_code)
+            else "models endpoint was not HTTP 200",
         )
     try:
         payload = response.json()
     except ValueError:
         return NativeModels([], response.status_code, "models endpoint was not JSON")
     # Read ids from data[] rather than gating on the envelope's object field.
-    # A live applicant (pearlresearch.ai) returns {"data": [...]} with valid
-    # ids and no top-level "object": "list"; requiring it found zero models,
-    # blocked every downstream tier, and reported a working endpoint as having
-    # a broken catalog. The gateway never reads that field.
-    # Together returns a bare top-level array of 280 models rather than
-    # {"data": [...]}; Pearl returns {"data": [...]} with no "object": "list".
-    # Both are real, served providers whose ids are perfectly readable, and
+    # One live endpoint returns {"data": [...]} with valid ids and no top-level
+    # "object": "list"; requiring it found zero models and blocked downstream
+    # tiers. Another returns a bare top-level array of hundreds of models.
+    # Both shapes have perfectly readable ids, and
     # the gateway routes from a curated catalog rather than this envelope.
     # Accept any shape whose model ids can be read, and let the declared-v2
     # check police the marketplace declaration.
@@ -227,13 +251,16 @@ async def discover_native_models(client: GatewayClient) -> NativeModels:
     if not isinstance(rows, list) or not rows:
         return NativeModels([], response.status_code, "models data must be non-empty")
     ids: list[str] = []
+    unreadable_rows = 0
     capabilities: dict[str, dict[str, bool]] = {}
     for row in rows:
         model_id = row.get("id") if isinstance(row, dict) else None
         if not isinstance(model_id, str) or not model_id.strip():
-            return NativeModels(
-                [], response.status_code, "every native model needs an id"
-            )
+            # One malformed row must not discard the readable ids beside it:
+            # Together advertises 280 models, and a single bad entry used to
+            # throw away all of them.
+            unreadable_rows += 1
+            continue
         ids.append(model_id)
         assert isinstance(row, dict)
         raw_capabilities = row.get("capabilities")
@@ -247,7 +274,12 @@ async def discover_native_models(client: GatewayClient) -> NativeModels:
                 capabilities[model_id] = discovered
     if len(ids) != len(set(ids)):
         return NativeModels([], response.status_code, "native model ids must be unique")
-    return NativeModels(ids, response.status_code, capabilities=capabilities)
+    return NativeModels(
+        ids,
+        response.status_code,
+        capabilities=capabilities,
+        unreadable_rows=unreadable_rows,
+    )
 
 
 async def run_catalog_checks(
@@ -264,17 +296,31 @@ async def run_catalog_checks(
     if evidence is not None:
         evidence.native_capabilities.update(native.capabilities)
     native_ok = bool(native.ids) and native.error is None
+    native_probe_status, native_probe_reason = probe_verdict(
+        native.response_status, declared=True
+    )
+    native_status = (
+        "pass"
+        if native_ok
+        else native_probe_status
+        if native.response_status != 200
+        else "fail"
+    )
     results = [
         check_result(
             id="catalog.native-model-discovery",
             tier=1,
-            status="pass" if native_ok else "fail",
-            assertion="GET /models advertises at least one unique, non-empty native model id",
+            status=native_status,
+            assertion=assertion_for("catalog.native-model-discovery"),
             measured={
                 "http_status": native.response_status,
                 "model_count": len(native.ids),
                 "model_ids": native.ids,
+                "unreadable_row_count": native.unreadable_rows,
                 "error": native.error,
+                "reason": native_probe_reason
+                if native.response_status != 200
+                else None,
             },
             contract_ref="enclave-go/internal/llm/byok.go (upstreamID is passed through)",
             marketplace_bullet="Native /v1/models ids are discoverable and are not forced into owner/model syntax.",
@@ -282,7 +328,7 @@ async def run_catalog_checks(
                 'Return HTTP 200 JSON shaped as {"object":"list","data":[{"id":...}]}; '
                 "include every chat-served native id exactly once. Do not rename engine-native ids merely to satisfy the marketplace catalog regex."
             ),
-            error_type="unsupported_route" if not native_ok else None,
+            error_type="unsupported_route" if native_status == "fail" else None,
             error_status=native.response_status,
             error_message=native.error,
         )
@@ -294,7 +340,7 @@ async def run_catalog_checks(
                 id="catalog.declared-v2",
                 tier=1,
                 status="skip",
-                assertion="declared marketplace catalog conforms to the published v2 schema and vendored rules",
+                assertion=assertion_for("catalog.declared-v2"),
                 measured={"reason": "--catalog-url was not supplied"},
                 contract_ref=f"{SCHEMA_URL}; enclave-go/internal/llm/byok.go",
                 marketplace_bullet="Provider Reliability Contract v2 catalog is machine-valid.",
@@ -312,6 +358,8 @@ async def run_catalog_checks(
     else:
         active_schema, schema_source = schema, "test-supplied"
     error_text: str | None = None
+    fetch_error = False
+    catalog_error_type: str | None = None
     declared_rows = 0
     try:
         async with httpx.AsyncClient(
@@ -319,44 +367,64 @@ async def run_catalog_checks(
         ) as public_client:
             response = await public_client.get(catalog_url)
             response.raise_for_status()
-            payload = response.json()
-        Draft202012Validator(active_schema, format_checker=FormatChecker()).validate(
-            payload
-        )
-        _validate_vendored_rules(payload)
-        assert isinstance(payload, dict)
-        data = payload.get("data")
-        declared_rows = len(data) if isinstance(data, list) else 0
-        if evidence is not None:
-            provider = payload.get("provider")
-            if isinstance(provider, dict) and isinstance(provider.get("id"), str):
-                evidence.provider_id = provider["id"]
-            if isinstance(data, list):
-                evidence.declared_models.extend(
-                    row for row in data if isinstance(row, dict)
-                )
-    except (
-        Exception
-    ) as error:  # schema validators expose several public exception types
+    except httpx.HTTPError as error:
+        fetch_error = True
+        catalog_error_type = error.__class__.__name__
         error_text = f"{error.__class__.__name__}: {error}"
+    else:
+        try:
+            payload = response.json()
+            Draft202012Validator(
+                active_schema, format_checker=FormatChecker()
+            ).validate(payload)
+            _validate_vendored_rules(payload)
+            assert isinstance(payload, dict)
+            data = payload.get("data")
+            declared_rows = len(data) if isinstance(data, list) else 0
+            if evidence is not None:
+                provider = payload.get("provider")
+                if isinstance(provider, dict) and isinstance(provider.get("id"), str):
+                    evidence.provider_id = provider["id"]
+                if isinstance(data, list):
+                    evidence.declared_models.extend(
+                        row for row in data if isinstance(row, dict)
+                    )
+        except (
+            AssertionError,
+            KeyError,
+            TypeError,
+            ValidationError,
+            ValueError,
+        ) as error:
+            catalog_error_type = error.__class__.__name__
+            error_text = f"{error.__class__.__name__}: {error}"
     catalog_ok = error_text is None
     results.append(
         check_result(
             id="catalog.declared-v2",
             tier=1,
-            status="pass" if catalog_ok else "fail",
-            assertion="declared marketplace catalog conforms to the published v2 schema and vendored id/decimal/field rules",
+            status="pass" if catalog_ok else "warn" if fetch_error else "fail",
+            assertion=assertion_for("catalog.declared-v2"),
             measured={
                 "schema_source": schema_source,
                 "declared_model_count": declared_rows,
                 "error": error_text,
+                "reason": (
+                    "catalog URL unreachable; validity unknown" if fetch_error else None
+                ),
             },
             contract_ref=f"{SCHEMA_URL}; scripts/pricing/provider_contract_catalog.py; enclave-go/internal/llm/byok.go",
             marketplace_bullet="Provider Reliability Contract v2 catalog is machine-valid.",
             remediation=(
                 "Validate the public declaration against catalog.v2.schema.json, emit every required field and no extras, use canonical owner/model ids only in this declaration, and encode every price as a non-negative decimal string. Keep /v1/models native ids unchanged."
             ),
-            error_type="probe_config_error" if not catalog_ok else None,
+            error_type=(
+                catalog_error_type
+                if fetch_error
+                else "probe_config_error"
+                if not catalog_ok
+                else None
+            ),
             error_message=error_text,
         )
     )

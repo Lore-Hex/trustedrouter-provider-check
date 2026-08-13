@@ -9,6 +9,7 @@ from tr_provider_check.contract import (
     _StreamObservation,
     _rotation_error_excluded_from_uptime,
 )
+from tr_provider_check.report import redact_text
 
 
 def _created_at(value: datetime | None) -> str:
@@ -18,11 +19,7 @@ def _created_at(value: datetime | None) -> str:
 def _scrub(message: str | None, secrets: tuple[str, ...]) -> str | None:
     if message is None:
         return None
-    result = message
-    for secret in secrets:
-        if secret:
-            result = result.replace(secret, "[REDACTED]")
-    return result[:300]
+    return redact_text(message, secrets)[:300]
 
 
 def error_sample(

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import gzip
 import time
-import zlib
 from collections.abc import AsyncIterator, Callable
 
 import httpx
 
+from tr_provider_check.checks.assertions import assertion_for
+from tr_provider_check.checks.catalog import CatalogEvidence
 from tr_provider_check.contract import (
     PONG_PROMPT,
     _classify,
@@ -17,33 +17,56 @@ from tr_provider_check.contract import (
     _response_error,
     _sse_line_payload,
     model_deadlines,
+    model_deadlines_declared,
 )
-from tr_provider_check.http import GatewayClient
+from tr_provider_check.http import GatewayClient, probe_verdict
 from tr_provider_check.report import CheckResult, CheckStatus, check_result
 
 Clock = Callable[[], float]
 
 
-class _RecordingStream(httpx.AsyncByteStream):
-    """Record wire bytes while the vendored observer remains the sole parser."""
+class _DecodedRecordingStream(httpx.AsyncByteStream):
+    """Decode once with httpx, then feed identical bytes to every consumer."""
 
     def __init__(
-        self, wrapped: httpx.AsyncByteStream, *, started: float, clock: Clock
+        self, response: httpx.Response, *, started: float, clock: Clock
     ) -> None:
-        self._wrapped = wrapped
+        if not isinstance(response.stream, httpx.AsyncByteStream):
+            raise TypeError("async streaming response exposed a synchronous body")
+        self._decoded_response = httpx.Response(
+            status_code=response.status_code,
+            headers=httpx.Headers(response.headers),
+            stream=response.stream,
+            request=response.request,
+        )
         self._started = started
         self._clock = clock
         self.records: list[tuple[int, bytes]] = []
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self._wrapped:
+        async for chunk in self._decoded_response.aiter_bytes():
             self.records.append(
                 (_elapsed_ms_with_clock(self._started, self._clock), chunk)
             )
             yield chunk
 
     async def aclose(self) -> None:
-        await self._wrapped.aclose()
+        await self._decoded_response.aclose()
+
+
+def _record_decoded_stream(
+    response: httpx.Response, *, started: float, clock: Clock
+) -> _DecodedRecordingStream:
+    """Install one decoded stream shared by the observer and timing checks."""
+
+    recorder = _DecodedRecordingStream(response, started=started, clock=clock)
+    response.stream = recorder
+    # The replacement stream is already decoded. Prevent response.aiter_bytes(),
+    # which the vendored observer calls, from applying the content codec twice.
+    for header in ("content-encoding", "content-length"):
+        if header in response.headers:
+            del response.headers[header]
+    return recorder
 
 
 def _skip(check_id: str, assertion: str, reason: str) -> CheckResult:
@@ -63,36 +86,8 @@ def _skip(check_id: str, assertion: str, reason: str) -> CheckResult:
     )
 
 
-def _decoded_wire(body: bytes) -> bytes:
-    """Return the wire body with transport compression removed.
-
-    The recorder wraps the raw transport stream, so a provider that gzips its
-    SSE -- Nebius does -- hands us compressed bytes that contain no `data: `
-    lines. Reporting that as unreadable framing blames a provider for a
-    correct, merely compressed, response. httpx decodes for its own readers;
-    the recorder has to decode for itself.
-    """
-
-    if body[:2] == b"\x1f\x8b":
-        try:
-            return gzip.decompress(body)
-        except (OSError, EOFError, zlib.error):
-            # A truncated stream is normal here: the recording ends whenever
-            # the observer stopped reading, so decompress what is available.
-            try:
-                return zlib.decompressobj(zlib.MAX_WBITS | 16).decompress(body)
-            except zlib.error:
-                return body
-    if body[:1] == b"\x78":
-        try:
-            return zlib.decompressobj().decompress(body)
-        except zlib.error:
-            return body
-    return body
-
-
 def _wire_framing(body: bytes, content_type: str) -> tuple[bool, int, list[str]]:
-    text = _decoded_wire(body).decode("utf-8", "replace")
+    text = body.decode("utf-8", "replace")
     lines = text.splitlines()
     data_lines = [line for line in lines if line.startswith("data: ")]
     invalid_data_lines = [
@@ -146,27 +141,27 @@ def _dependent_stream_results(reason: str) -> list[CheckResult]:
     return [
         _skip(
             "stream.sse-framing",
-            "the HTTP 200 body uses enclave-readable SSE data framing",
+            assertion_for("stream.sse-framing"),
             reason,
         ),
         _skip(
             "stream.done",
-            "the successful SSE stream ends with data: [DONE]",
+            assertion_for("stream.done"),
             reason,
         ),
         _skip(
             "stream.usage",
-            "stream_options.include_usage produces an actual usage chunk",
+            assertion_for("stream.usage"),
             reason,
         ),
         _skip(
             "stream.first-delta",
-            "the first non-empty content, reasoning, or tool delta arrives within budget",
+            assertion_for("stream.first-delta"),
             reason,
         ),
         _skip(
             "stream.incremental-delivery",
-            "the provider does not withhold the whole successful stream before delivery",
+            assertion_for("stream.incremental-delivery"),
             reason,
         ),
     ]
@@ -177,6 +172,7 @@ async def run_streaming_checks(
     model: str,
     *,
     first_token_budget_seconds: float | None = None,
+    evidence: CatalogEvidence | None = None,
     clock: Clock = time.perf_counter,
 ) -> list[CheckResult]:
     """Run Tier 4 against the vendored production stream observer.
@@ -192,11 +188,29 @@ async def run_streaming_checks(
     retried safely.
     """
 
-    budget_seconds = (
-        model_deadlines(model).first_token_seconds
-        if first_token_budget_seconds is None
-        else first_token_budget_seconds
+    reliability = evidence.reliability(model) if evidence is not None else None
+    raw_declared_budget = (
+        reliability.get("first_token_timeout_seconds")
+        if isinstance(reliability, dict)
+        else None
     )
+    declared_budget = (
+        float(raw_declared_budget)
+        if isinstance(raw_declared_budget, (int, float))
+        and not isinstance(raw_declared_budget, bool)
+        else None
+    )
+    if first_token_budget_seconds is not None:
+        budget_seconds = first_token_budget_seconds
+        budget_source = "argument"
+    elif declared_budget is not None:
+        budget_seconds = model_deadlines_declared(
+            model, declared_first_token_seconds=declared_budget
+        ).first_token_seconds
+        budget_source = "declared"
+    else:
+        budget_seconds = model_deadlines(model).first_token_seconds
+        budget_source = "fallback"
     if budget_seconds <= 0:
         raise ValueError("first_token_budget_seconds must be positive")
 
@@ -213,14 +227,18 @@ async def run_streaming_checks(
                 await response.aread()
                 error_type, error_status, error_message = _response_error(response)
                 verdict = _classify(status_code, response.text[:4096])
-                status: CheckStatus = "warn" if verdict == "flaky" else "fail"
+                status, reason = probe_verdict(status_code, declared=True)
                 return [
                     check_result(
                         id="stream.response-status",
                         tier=4,
                         status=status,
-                        assertion="the selected model accepts a streaming request",
-                        measured={"http_status": status_code, "route_verdict": verdict},
+                        assertion=assertion_for("stream.response-status"),
+                        measured={
+                            "http_status": status_code,
+                            "route_verdict": verdict,
+                            "reason": reason,
+                        },
                         contract_ref="enclave-go/internal/llm/byok.go (non-200 is upstreamHTTPError before translation)",
                         marketplace_bullet="Streaming requests are accepted for the advertised route.",
                         remediation="Make this model available on POST /chat/completions; use 429/503 with Retry-After only for genuinely transient capacity, and a precise 4xx for permanent request errors.",
@@ -232,7 +250,7 @@ async def run_streaming_checks(
                         id="stream.error-signaling",
                         tier=4,
                         status="pass",
-                        assertion="errors are HTTP failures before stream bytes, never data: {error} after HTTP 200",
+                        assertion=assertion_for("stream.error-signaling"),
                         measured={
                             "http_status": status_code,
                             "error_before_stream": True,
@@ -244,10 +262,7 @@ async def run_streaming_checks(
                     *_dependent_stream_results("stream request returned non-200"),
                 ]
 
-            if not isinstance(response.stream, httpx.AsyncByteStream):
-                raise TypeError("async streaming response exposed a synchronous body")
-            recorder = _RecordingStream(response.stream, started=started, clock=clock)
-            response.stream = recorder
+            recorder = _record_decoded_stream(response, started=started, clock=clock)
             observation = await _observe_provider_stream(
                 response,
                 started=started,
@@ -258,15 +273,17 @@ async def run_streaming_checks(
             transport_chunk_count = len(recorder.records)
             content_type = response.headers.get("content-type", "")
     except httpx.HTTPError as request_error:
+        status, reason = probe_verdict(None, declared=True)
         return [
             check_result(
                 id="stream.response-status",
                 tier=4,
-                status="fail",
-                assertion="the selected model accepts a streaming request",
+                status=status,
+                assertion=assertion_for("stream.response-status"),
                 measured={
                     "http_status": None,
                     "error_type": request_error.__class__.__name__,
+                    "reason": reason,
                 },
                 contract_ref="enclave-go/internal/llm/byok.go (http client failure before translation)",
                 marketplace_bullet="Streaming requests are accepted for the advertised route.",
@@ -276,8 +293,8 @@ async def run_streaming_checks(
             check_result(
                 id="stream.error-signaling",
                 tier=4,
-                status="fail",
-                assertion="errors are HTTP failures before stream bytes, never data: {error} after HTTP 200",
+                status=status,
+                assertion=assertion_for("stream.error-signaling"),
                 measured={"http_status": None, "error_before_stream": False},
                 contract_ref="enclave-go/internal/llm/byok.go; enclave-go/cmd/enclave/provider_stream.go",
                 marketplace_bullet="Provider failures are visible before the gateway commits a successful stream.",
@@ -294,7 +311,7 @@ async def run_streaming_checks(
             id="stream.response-status",
             tier=4,
             status="pass",
-            assertion="the selected model accepts a streaming request",
+            assertion=assertion_for("stream.response-status"),
             measured={"http_status": 200},
             contract_ref="enclave-go/internal/llm/byok.go (HTTP 200 enters stream translation)",
             marketplace_bullet="Streaming requests are accepted for the advertised route.",
@@ -303,28 +320,42 @@ async def run_streaming_checks(
     ]
 
     framing_ok, data_line_count, invalid_data_lines = _wire_framing(wire, content_type)
-    # Recording no bytes at all is a failure to OBSERVE, not evidence of bad
-    # framing. Nebius returned 200 with text/event-stream and a well-formed
-    # 1296-byte body that a direct read reproduces, yet nothing reached the
-    # recorder -- and the provider was reported as emitting unreadable SSE.
-    # Never conclude a provider's wire is wrong from bytes we failed to capture.
     wire_unobserved = not wire
+    genuinely_empty = (
+        wire_unobserved
+        and observation.ttfb_milliseconds is None
+        and observation.first_token_milliseconds is None
+        and first_tool_ms is None
+    )
+    capture_failed = wire_unobserved and not genuinely_empty
+    framing_status: CheckStatus = (
+        "pass"
+        if framing_ok
+        else "fail"
+        if genuinely_empty or not capture_failed
+        else "warn"
+    )
     results.append(
         check_result(
             id="stream.sse-framing",
             tier=4,
-            status=("pass" if framing_ok else "warn" if wire_unobserved else "fail"),
-            assertion="the HTTP 200 body uses enclave-readable SSE data framing",
+            status=framing_status,
+            assertion=assertion_for("stream.sse-framing"),
             measured={
                 "content_type": content_type,
                 "data_line_count": data_line_count,
                 "invalid_data_line_count": len(invalid_data_lines),
                 "wire_unobserved": wire_unobserved,
+                "genuinely_empty": genuinely_empty,
+                "capture_failed": capture_failed,
                 **(
                     {
-                        "reason": "no response bytes reached the recorder, so "
-                        "framing could not be observed; this is not evidence "
-                        "the provider's framing is wrong"
+                        "reason": (
+                            "HTTP 200 carried no response bytes or content deltas"
+                            if genuinely_empty
+                            else "the observer populated from the response but no "
+                            "decoded bytes reached the recorder; framing is unknown"
+                        )
                     }
                     if wire_unobserved
                     else {}
@@ -333,7 +364,7 @@ async def run_streaming_checks(
             contract_ref="enclave-go/internal/llm/stream_translate.go (accepts only lines prefixed 'data: ')",
             marketplace_bullet="Streaming responses use text/event-stream and enclave-readable data lines.",
             remediation="For stream=true, return Content-Type: text/event-stream and frame each JSON event exactly as 'data: <json>\\n\\n'. Do not return a plain JSON 200 body.",
-            error_type=None if framing_ok or wire_unobserved else "empty_stream",
+            error_type="empty_stream" if framing_status == "fail" else None,
         )
     )
 
@@ -343,7 +374,7 @@ async def run_streaming_checks(
             id="stream.error-signaling",
             tier=4,
             status="fail" if stream_error is not None else "pass",
-            assertion="errors are HTTP failures before stream bytes, never data: {error} after HTTP 200",
+            assertion=assertion_for("stream.error-signaling"),
             measured={
                 "http_status": 200,
                 "midstream_error_type": stream_error[0] if stream_error else None,
@@ -363,22 +394,22 @@ async def run_streaming_checks(
             [
                 _skip(
                     "stream.done",
-                    "the successful SSE stream ends with data: [DONE]",
+                    assertion_for("stream.done"),
                     "SSE framing is not enclave-readable",
                 ),
                 _skip(
                     "stream.usage",
-                    "stream_options.include_usage produces an actual usage chunk",
+                    assertion_for("stream.usage"),
                     "SSE framing is not enclave-readable",
                 ),
                 _skip(
                     "stream.first-delta",
-                    "the first non-empty content, reasoning, or tool delta arrives within budget",
+                    assertion_for("stream.first-delta"),
                     "SSE framing is not enclave-readable",
                 ),
                 _skip(
                     "stream.incremental-delivery",
-                    "the provider does not withhold the whole successful stream before delivery",
+                    assertion_for("stream.incremental-delivery"),
                     "SSE framing is not enclave-readable",
                 ),
             ]
@@ -400,11 +431,16 @@ async def run_streaming_checks(
             id="stream.first-delta",
             tier=4,
             status="pass" if first_delta_ok else "fail",
-            assertion="the first non-empty content, reasoning, or tool delta arrives within budget",
+            assertion=assertion_for("stream.first-delta"),
             measured={
                 "ttfb_milliseconds": observation.ttfb_milliseconds,
                 "first_delta_milliseconds": first_token_ms,
+                "first_content_or_reasoning_delta_milliseconds": (
+                    content_or_reasoning_ms
+                ),
+                "first_tool_delta_milliseconds": first_tool_ms,
                 "budget_milliseconds": budget_ms,
+                "budget_source": budget_source,
             },
             contract_ref="enclave-go/internal/llm/stream_translate.go; enclave-go/cmd/enclave/provider_stream.go (translated first-byte budget)",
             marketplace_bullet="A role-only chunk or SSE ping does not mask late model output.",
@@ -418,30 +454,30 @@ async def run_streaming_checks(
             [
                 _skip(
                     "stream.done",
-                    "the successful SSE stream ends with data: [DONE]",
+                    assertion_for("stream.done"),
                     "the HTTP 200 stream carried an in-band error",
                 ),
                 _skip(
                     "stream.usage",
-                    "stream_options.include_usage produces an actual usage chunk",
+                    assertion_for("stream.usage"),
                     "the HTTP 200 stream carried an in-band error",
                 ),
                 _skip(
                     "stream.incremental-delivery",
-                    "the provider does not withhold the whole successful stream before delivery",
+                    assertion_for("stream.incremental-delivery"),
                     "the HTTP 200 stream carried an in-band error",
                 ),
             ]
         )
         return results
 
-    done_ok = any(line == b"data: [DONE]" for line in _decoded_wire(wire).splitlines())
+    done_ok = any(line == b"data: [DONE]" for line in wire.splitlines())
     results.append(
         check_result(
             id="stream.done",
             tier=4,
             status="pass" if done_ok else "warn",
-            assertion="the successful SSE stream ends with data: [DONE]",
+            assertion=assertion_for("stream.done"),
             measured={"done_sentinel": done_ok},
             contract_ref="enclave-go/internal/llm/stream_translate.go (DONE terminates scanning; EOF is tolerated)",
             marketplace_bullet="Successful streams carry the conventional terminal [DONE] sentinel.",
@@ -460,7 +496,7 @@ async def run_streaming_checks(
             id="stream.usage",
             tier=4,
             status="pass" if usage_ok else "fail",
-            assertion="stream_options.include_usage produces an actual usage chunk",
+            assertion=assertion_for("stream.usage"),
             measured={
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
@@ -477,7 +513,7 @@ async def run_streaming_checks(
         results.append(
             _skip(
                 "stream.incremental-delivery",
-                "the provider does not withhold the whole successful stream before delivery",
+                assertion_for("stream.incremental-delivery"),
                 "no non-empty content or reasoning delta arrived",
             )
         )
@@ -491,7 +527,7 @@ async def run_streaming_checks(
                 id="stream.incremental-delivery",
                 tier=4,
                 status="pass" if incremental_ok else "warn",
-                assertion="the provider does not withhold the whole successful stream before delivery",
+                assertion=assertion_for("stream.incremental-delivery"),
                 measured={
                     "first_delta_milliseconds": first_token_ms,
                     "last_delta_milliseconds": observation.last_token_milliseconds,

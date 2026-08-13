@@ -9,9 +9,10 @@ from typing import Any, Literal
 
 import httpx
 
+from tr_provider_check.report import CheckStatus
+
 from urllib.parse import urlsplit
 
-from tr_provider_check.contract import _rotation_omits_temperature
 
 TOTAL_TIMEOUT_SECONDS = 10 * 60.0
 CONNECT_TIMEOUT_SECONDS = 10.0
@@ -110,7 +111,7 @@ def probe_inconclusive(status_code: int | None) -> bool:
     the field. That inference only holds for a 4xx: the server read the request
     and refused it. A 5xx or 429 means it never got that far, so reporting
     "this provider rejects X" states a cause the evidence does not support.
-    Observed against a live applicant whose backend returns intermittent 502s:
+    Observed against a live endpoint whose backend returns intermittent 502s:
     a 502 on the temperature probe was reported as a hard temperature-rejection
     failure, and the same request succeeded minutes later.
     """
@@ -118,6 +119,28 @@ def probe_inconclusive(status_code: int | None) -> bool:
     if status_code is None:
         return True
     return status_code == 429 or 500 <= status_code <= 599
+
+
+def probe_verdict(
+    status_code: int | None, *, declared: bool
+) -> tuple[CheckStatus, str | None]:
+    """Apply the shared capability/route probe evidence ladder.
+
+    HTTP 200 proves the request was accepted. A missing response, 429, or 5xx
+    proves neither support nor rejection and is therefore advisory. A permanent
+    rejection fails only when the capability or route was declared; otherwise
+    the probe did not discover the capability and skips.
+    """
+
+    if status_code == 200:
+        return "pass", None
+    if status_code is None:
+        return "warn", "probe did not receive an HTTP response; support is unknown"
+    if probe_inconclusive(status_code):
+        return "warn", "backend unavailable during the probe; support is unknown"
+    if declared:
+        return "fail", "the declared capability or route rejected the probe"
+    return "skip", "the undeclared capability was not discovered by the probe"
 
 
 def _is_transient_status(status_code: int) -> bool:
@@ -173,7 +196,13 @@ class GatewayClient:
         # answers GET /models with 406 Not Acceptable, which this tool then
         # reported as the PROVIDER's broken catalog. Accusing a conformant
         # provider of a fault we caused is the worst failure this tool has.
-        request_headers = {"User-Agent": "TrustedRouter/1.0"}
+        # Go's default Transport automatically advertises gzip and transparently
+        # decodes it. Pinning the header keeps httpx from additionally offering
+        # deflate or Brotli, which the enclave does not negotiate.
+        request_headers = {
+            "User-Agent": "TrustedRouter/1.0",
+            "Accept-Encoding": "gzip",
+        }
         if api_key:
             request_headers["Authorization"] = f"Bearer {api_key}"
         if headers:
@@ -238,7 +267,7 @@ class GatewayClient:
         if stream:
             body["stream_options"] = {"include_usage": True}
         provider = self.provider or provider_for_model(model)
-        if temperature is not None and not _rotation_omits_temperature(provider, model):
+        if temperature is not None and not gateway_omits_temperature(provider, model):
             body["temperature"] = temperature
         if max_tokens is not None:
             key = max_tokens_key or max_token_parameter(provider, model)

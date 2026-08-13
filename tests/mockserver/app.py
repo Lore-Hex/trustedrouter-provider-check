@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 import threading
 import time
+import zlib
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+
+import brotli  # type: ignore[import-untyped]
 
 # A hang guard, never a latency assertion. Deliberate fixture delays are far
 # below this value so an overloaded test machine cannot turn it into a tight
@@ -41,15 +43,25 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
     "catalog_and_serving_disagree": {
         "catalog_lists_403_model": "A listed route serves an HTML authorization error.",
         "catalog_lists_404_model": "A listed route is absent from chat serving.",
+        "catalog_declares_dead_chat": "A valid catalog declares a chat id that the serving route lacks.",
         "invalid_declared_catalog": "A marketplace declaration uses a native id where owner/model is required.",
         "native_models_empty": "Native discovery returns an empty model list.",
         "native_noncanonical_ids": "Native discovery returns valid engine-native ids without owner prefixes.",
-        "models_without_object_envelope": "Native discovery omits the top-level object:list envelope (pearlresearch.ai).",
+        "models_without_object_envelope": "Native discovery returns readable data[] ids without a top-level object:list field.",
         "models_without_data_array": "Native discovery returns an object with no data[] array at all.",
+        "models_non_200": "Native discovery returns a permanent HTTP error.",
+        "models_non_json": "Native discovery returns a non-JSON HTTP 200 body.",
+        "models_duplicate_rows": "Native discovery repeats a model id.",
+        "models_malformed_rows": "Native discovery mixes one readable id with malformed rows.",
+        "models_embedding_first": "Native discovery lists a non-chat route before a callable chat model.",
+        "catalog_fetch_503": "The declared catalog URL is transiently unreachable.",
         "capability_probe_backend_down": "A capability probe hits a 502 rather than a parameter refusal.",
         "structured_json_in_content_prose_in_reasoning": "Exact JSON in content while reasoning_content holds prose (Fireworks glm-5p2).",
         "gzipped_sse": "A conformant SSE stream compressed with gzip (Nebius).",
+        "deflated_sse": "A conformant SSE stream unexpectedly compressed with deflate.",
+        "brotli_sse": "A conformant SSE stream unexpectedly compressed with Brotli.",
         "models_bare_array": "Native discovery returns a top-level JSON array, not {data: [...]} (Together).",
+        "models_transient_503": "Native discovery answers 503 -- a capacity blip, not an unsupported route.",
     },
     "request_rejected_before_completion": {
         "queue_then_429": "Queueing consumes the probe budget before capacity rejects.",
@@ -58,6 +70,8 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
         "rejects_response_format": "A backend rejects a forwarded response_format field.",
         "rejects_temperature_zero": "A backend rejects deterministic temperature=0.",
         "rejects_tools": "A backend rejects forwarded tool definitions.",
+        "tools_probe_backend_down": "A tool capability probe hits a transient 503.",
+        "tool_round_trip_backend_down": "The tool replay hits a transient 503.",
         "strict_extra_fields": "A strict schema rejects translator-only request fields.",
     },
     "completion_and_shared_shapes": {
@@ -67,6 +81,8 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
         "chat_reasoning_shapes": "A completion uses a tolerated content or reasoning shape.",
         "structured_non_json": "An accepted JSON-object request returns plain text.",
         "structured_schema_violation": "An accepted JSON-Schema request returns schema-invalid JSON.",
+        "structured_wording_near_miss": "A JSON-Schema response uses valid types but different model-selected values.",
+        "tool_round_trip_calls_tool": "The replay is accepted but the model chooses another tool call.",
         "unknown_finish_reason": "A completion reports a provider-specific terminal reason.",
         "wrong_model": "A completion reports a different native model id.",
         "wrong_pong": "A non-empty completion misses the deterministic PONG marker.",
@@ -80,6 +96,7 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
         "no_done_sentinel": "A stream closes without the terminal [DONE] sentinel.",
         "no_space_framing": "SSE data fields omit the optional space after the colon.",
         "non_sse_200": "stream=true receives a plain JSON completion.",
+        "empty_stream_200": "stream=true receives HTTP 200 with a genuinely empty body.",
         "perf_insufficient_output": "A long throughput probe reports fewer than 128 output tokens.",
         "role_then_late_content": "A role chunk and ping arrive before late real content.",
         "tool_deltas_missing_index": "Tool-call fragments omit their correlation index.",
@@ -106,6 +123,7 @@ class _ServerState:
     request_log: list[RequestRecord] = field(default_factory=list)
     request_lock: threading.Lock = field(default_factory=threading.Lock)
     knobs: ModeKnobs = field(default_factory=ModeKnobs)
+    default_mode: str = "conforming"
 
 
 class _MockHTTPServer(ThreadingHTTPServer):
@@ -152,7 +170,7 @@ def _completion(
     return result
 
 
-def _catalog(*, invalid: bool = False) -> dict[str, Any]:
+def _catalog(*, invalid: bool = False, model_id: str | None = None) -> dict[str, Any]:
     return {
         "object": "list",
         "contract_version": "2.0",
@@ -172,7 +190,7 @@ def _catalog(*, invalid: bool = False) -> dict[str, Any]:
         },
         "data": [
             {
-                "id": "deepseek-chat" if invalid else "mock/model",
+                "id": "deepseek-chat" if invalid else model_id or "mock/model",
                 "object": "model",
                 "owned_by": "mock",
                 "name": "Mock model",
@@ -444,16 +462,39 @@ class _MockHandler(BaseHTTPRequestHandler):
     ) -> None:
         if initial_delay_seconds:
             time.sleep(initial_delay_seconds)
-        # Nebius gzips its SSE. A recorder that wraps the raw transport sees
-        # compressed bytes with no data: lines in them.
-        gzipped = self.headers.get("X-Mock-Mode") == "gzipped_sse"
-        if gzipped:
-            frames = [gzip.compress(b"".join(frames))]
-            incremental = False
+        compression_mode = self.headers.get("X-Mock-Mode")
+        content_encoding: str | None = None
+        if compression_mode == "gzipped_sse":
+            compressor = zlib.compressobj(wbits=zlib.MAX_WBITS | 16)
+            compressed_frames = [
+                compressor.compress(frame) + compressor.flush(zlib.Z_SYNC_FLUSH)
+                for frame in frames
+            ]
+            compressed_frames[-1] += compressor.flush(zlib.Z_FINISH)
+            frames = compressed_frames
+            content_encoding = "gzip"
+        elif compression_mode == "deflated_sse":
+            compressor = zlib.compressobj()
+            compressed_frames = [
+                compressor.compress(frame) + compressor.flush(zlib.Z_SYNC_FLUSH)
+                for frame in frames
+            ]
+            compressed_frames[-1] += compressor.flush(zlib.Z_FINISH)
+            frames = compressed_frames
+            content_encoding = "deflate"
+        elif compression_mode == "brotli_sse":
+            brotli_compressor = brotli.Compressor()
+            compressed_frames = [
+                brotli_compressor.process(frame) + brotli_compressor.flush()
+                for frame in frames
+            ]
+            compressed_frames[-1] += brotli_compressor.finish()
+            frames = compressed_frames
+            content_encoding = "br"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
-        if gzipped:
-            self.send_header("Content-Encoding", "gzip")
+        if content_encoding is not None:
+            self.send_header("Content-Encoding", content_encoding)
         self.send_header("Connection", "close")
         self.end_headers()
         if not incremental:
@@ -473,7 +514,7 @@ class _MockHandler(BaseHTTPRequestHandler):
 
     def _mode_or_send_error(self) -> str | None:
         """Return a valid mode, or write the terminal 400 response for the caller."""
-        mode = self.headers.get("X-Mock-Mode", "conforming")
+        mode = self.headers.get("X-Mock-Mode", self.server.state.default_mode)
         if mode in MOCK_MODES:
             return mode
         self._send_json(
@@ -499,9 +540,22 @@ class _MockHandler(BaseHTTPRequestHandler):
                     {"error": {"type": "unknown_mock_mode"}},
                 )
                 return
+            if requested_mode == "catalog_fetch_503":
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": {"type": "api_error"}},
+                )
+                return
             self._send_json(
                 HTTPStatus.OK,
-                _catalog(invalid=requested_mode == "invalid_declared_catalog"),
+                _catalog(
+                    invalid=requested_mode == "invalid_declared_catalog",
+                    model_id=(
+                        "mock/catalog-missing"
+                        if requested_mode == "catalog_declares_dead_chat"
+                        else None
+                    ),
+                ),
             )
             return
         if parsed_url.path != "/v1/models":
@@ -513,6 +567,45 @@ class _MockHandler(BaseHTTPRequestHandler):
         if mode == "native_models_empty":
             self._send_json(HTTPStatus.OK, {"object": "list", "data": []})
             return
+        if mode == "models_transient_503":
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE, {"error": {"type": "api_error"}}
+            )
+            return
+        if mode == "models_non_200":
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": {"type": "not_found"}})
+            return
+        if mode == "models_non_json":
+            self._send(
+                HTTPStatus.OK,
+                b"not json",
+                content_type="text/plain",
+            )
+            return
+        if mode == "models_duplicate_rows":
+            self._send_json(
+                HTTPStatus.OK,
+                {"data": [{"id": "mock/model"}, {"id": "mock/model"}]},
+            )
+            return
+        if mode == "models_malformed_rows":
+            self._send_json(
+                HTTPStatus.OK,
+                {"data": [None, {"id": ""}, {"id": "mock/model"}]},
+            )
+            return
+        if mode == "models_embedding_first":
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "object": "list",
+                    "data": [
+                        {"id": "mock/embedding", "object": "model"},
+                        {"id": "mock/chat", "object": "model"},
+                    ],
+                },
+            )
+            return
         if mode == "models_bare_array":
             self._send_json(
                 HTTPStatus.OK,
@@ -520,7 +613,7 @@ class _MockHandler(BaseHTTPRequestHandler):
             )
             return
         if mode == "models_without_object_envelope":
-            # pearlresearch.ai's real shape: valid ids, no object envelope.
+            # Real-world shape: valid data[] ids, no object envelope.
             self._send_json(
                 HTTPStatus.OK,
                 {
@@ -589,6 +682,12 @@ class _MockHandler(BaseHTTPRequestHandler):
                 {"error": {"type": "model_not_found", "message": "model not found"}},
             )
             return
+        if mode == "models_embedding_first" and model == "mock/embedding":
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": {"type": "model_not_found", "message": "not chat"}},
+            )
+            return
         # Production probe case: queueing consumes the deadline, then capacity rejects.
         if mode == "queue_then_429":
             self._send_json(
@@ -631,6 +730,12 @@ class _MockHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if mode == "tools_probe_backend_down" and payload.get("tools"):
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": {"type": "api_error"}},
+            )
+            return
         if mode == "structured_json_in_content_prose_in_reasoning" and (
             "response_format" in payload
         ):
@@ -663,8 +768,8 @@ class _MockHandler(BaseHTTPRequestHandler):
         if mode == "capability_probe_backend_down" and (
             "response_format" in payload or payload.get("temperature") == 0
         ):
-            # The applicant case: an intermittently dead backend answers the
-            # capability probe with 502. Nothing was learned about support.
+            # An intermittently unavailable backend answers the capability
+            # probe with 502. Nothing was learned about support.
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": {"type": "api_error"}})
             return
         if mode == "rejects_response_format" and "response_format" in payload:
@@ -680,6 +785,12 @@ class _MockHandler(BaseHTTPRequestHandler):
             return
         messages = payload.get("messages")
         tool_round_trip = _is_tool_round_trip(messages)
+        if mode == "tool_round_trip_backend_down" and tool_round_trip:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": {"type": "api_error"}},
+            )
+            return
         if mode == "rejects_empty_tool_content" and tool_round_trip:
             assert isinstance(messages, list)
             assistant = next(
@@ -715,6 +826,24 @@ class _MockHandler(BaseHTTPRequestHandler):
         stream = payload.get("stream") is True
         if not stream:
             if tool_round_trip:
+                if mode == "tool_round_trip_calls_tool":
+                    completion = _completion(
+                        model, content="", finish_reason="tool_calls"
+                    )
+                    message = completion["choices"][0]["message"]
+                    assert isinstance(message, dict)
+                    message["tool_calls"] = [
+                        {
+                            "id": "call_again",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_time",
+                                "arguments": '{"city":"Athens"}',
+                            },
+                        }
+                    ]
+                    self._send_json(HTTPStatus.OK, completion)
+                    return
                 self._send_json(
                     HTTPStatus.OK,
                     _completion(model, content="TOOLS COMPLETE"),
@@ -730,6 +859,11 @@ class _MockHandler(BaseHTTPRequestHandler):
                     and format_type == "json_schema"
                 ):
                     content = '{"answer":"NOPE","count":"two"}'
+                elif (
+                    mode == "structured_wording_near_miss"
+                    and format_type == "json_schema"
+                ):
+                    content = '{"answer":"NEAR","count":3}'
                 else:
                     content = '{"answer":"PONG","count":2}'
                 self._send_json(HTTPStatus.OK, _completion(model, content=content))
@@ -764,6 +898,9 @@ class _MockHandler(BaseHTTPRequestHandler):
         if mode == "non_sse_200":
             # Production failure: stream=true ignored and a plain JSON completion is returned.
             self._send_json(HTTPStatus.OK, _completion(model))
+            return
+        if mode == "empty_stream_200":
+            self._send(HTTPStatus.OK, b"", content_type="text/event-stream")
             return
 
         role = _chunk(model, delta={"role": "assistant", "content": ""})
@@ -805,7 +942,17 @@ class _MockHandler(BaseHTTPRequestHandler):
         space = mode != "no_space_framing"
         delay = 0.0
         delays_after: list[float] | None = None
-        if mode == "finish_reason_only":
+        if mode in {"gzipped_sse", "deflated_sse", "brotli_sse"}:
+            frames = [
+                _sse_frame(role),
+                _sse_frame(_shape_chunk("mock/tool-call")),
+                _sse_frame(_chunk(model, delta={"content": "PONG"})),
+                _sse_frame(finish),
+            ]
+            if include_usage:
+                frames.append(_sse_frame(usage))
+            frames.append(_sse_frame("[DONE]"))
+        elif mode == "finish_reason_only":
             # Production failure: successful SSE terminates without any visible token.
             frames = [_sse_frame(finish)]
             if include_usage:
@@ -978,6 +1125,12 @@ class MockOpenAIServer:
     def reset(self) -> None:
         self.clear_requests()
         self._httpd.state.knobs = ModeKnobs()
+        self._httpd.state.default_mode = "conforming"
+
+    def set_default_mode(self, mode: str) -> None:
+        if mode not in MOCK_MODES:
+            raise ValueError(f"unknown mock mode {mode!r}")
+        self._httpd.state.default_mode = mode
 
     def start(self) -> None:
         if self._started:

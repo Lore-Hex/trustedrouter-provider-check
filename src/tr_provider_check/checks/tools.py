@@ -8,8 +8,9 @@ from typing import Any
 
 import httpx
 
+from tr_provider_check.checks.assertions import assertion_for
 from tr_provider_check.contract import _chat_text, _response_error
-from tr_provider_check.http import GatewayClient
+from tr_provider_check.http import GatewayClient, probe_verdict
 from tr_provider_check.report import CheckResult, CheckStatus, check_result
 
 _TOOLS: list[dict[str, Any]] = [
@@ -64,6 +65,24 @@ def _sse_payloads(body: bytes) -> list[dict[str, Any]]:
     return payloads
 
 
+def _completion_tool_call_count(response: httpx.Response) -> int:
+    """Count a model-selected follow-up tool call in a JSON completion."""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return 0
+    choice = choices[0]
+    message = choice.get("message") if isinstance(choice, dict) else None
+    calls = message.get("tool_calls") if isinstance(message, dict) else None
+    return len(calls) if isinstance(calls, list) else 0
+
+
 def _error_result(
     *,
     check_id: str,
@@ -73,18 +92,18 @@ def _error_result(
     error_type: str | None,
     error_message: str | None,
 ) -> CheckResult:
-    status: CheckStatus = "fail" if declared is True else "skip"
-    reason = (
-        "the declared tools capability rejected the enclave request"
-        if declared is True
-        else "tools were neither declared nor discoverable: the probe was rejected"
-    )
+    status, reason = probe_verdict(status_code, declared=declared is True)
     return check_result(
         id=check_id,
         tier=5,
         status=status,
         assertion=assertion,
-        measured={"reason": reason, "http_status": status_code},
+        measured={
+            "reason": reason,
+            "http_status": status_code,
+            "capability_declared": declared,
+            "inconclusive": status == "warn",
+        },
         contract_ref="enclave-go/internal/llm/byok.go",
         marketplace_bullet="Tool requests use the OpenAI-compatible enclave wire shape.",
         remediation="Declare tools only for models that accept tools, tool_choice, and parallel_tool_calls on /chat/completions.",
@@ -102,11 +121,7 @@ async def run_parallel_tool_delta_check(
 ) -> tuple[CheckResult, _ToolTurn | None]:
     """Check the delta invariants consumed by ``llm/stream_translate.go``."""
 
-    assertion = (
-        "a forced parallel tool stream emits at least two calls; every tool delta "
-        "has index, each index's first delta has function.name, and concatenated "
-        "arguments are valid JSON"
-    )
+    assertion = assertion_for("tools.parallel-deltas")
     if declared is False:
         return (
             check_result(
@@ -314,10 +329,7 @@ async def run_tool_round_trip_check(
 ) -> CheckResult:
     """Replay the exact empty-string tool turn built in ``llm/byok.go``."""
 
-    assertion = (
-        'a replayed assistant tool turn uses content:"" plus role:"tool" results '
-        "and receives a normal non-empty assistant completion"
-    )
+    assertion = assertion_for("tools.round-trip")
     if turn is None:
         return check_result(
             id="tools.round-trip",
@@ -358,21 +370,38 @@ async def run_tool_round_trip_check(
         )
         response_status: int | None = response.status_code
         text = _chat_text(response) if response.status_code == 200 else ""
+        alternative_tool_calls = (
+            _completion_tool_call_count(response) if response.status_code == 200 else 0
+        )
         ok = response.status_code == 200 and bool(text.strip())
         if response.status_code != 200:
+            result_status, reason = probe_verdict(response.status_code, declared=True)
             error_type, error_status, error_message = _response_error(response)
+        elif alternative_tool_calls:
+            result_status = "warn"
+            reason = (
+                "the replay shape was accepted, but the model chose another tool "
+                "call instead of a text answer"
+            )
+            error_type, error_status, error_message = None, None, None
         elif not ok:
+            result_status = "fail"
+            reason = "tool replay returned no normal assistant content"
             error_type, error_status, error_message = (
                 "empty_stream",
                 response.status_code,
-                "tool replay returned no normal assistant content",
+                reason,
             )
         else:
+            result_status = "pass"
+            reason = None
             error_type, error_status, error_message = None, None, None
     except httpx.HTTPError as error:
         ok = False
         text = ""
+        alternative_tool_calls = 0
         response_status = None
+        result_status, reason = probe_verdict(None, declared=True)
         error_type, error_status, error_message = (
             error.__class__.__name__,
             None,
@@ -382,7 +411,7 @@ async def run_tool_round_trip_check(
     return check_result(
         id="tools.round-trip",
         tier=5,
-        status="pass" if ok else "fail",
+        status=result_status,
         assertion=assertion,
         measured={
             "http_status": response_status,
@@ -390,6 +419,8 @@ async def run_tool_round_trip_check(
             "assistant_content_type": "string",
             "assistant_content_length": 0,
             "completion_nonempty": bool(text.strip()),
+            "alternative_tool_call_count": alternative_tool_calls,
+            "reason": reason,
         },
         contract_ref=(
             "enclave-go/internal/llm/byok.go "
