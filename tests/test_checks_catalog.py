@@ -131,3 +131,17 @@ async def test_models_without_a_data_array_still_fails(
     assert models == []
     discovery = next(r for r in results if r.id == "catalog.native-model-discovery")
     assert discovery.status == "fail"
+
+
+@pytest.mark.asyncio
+async def test_bare_array_models_response_still_yields_ids(
+    mock_server: MockOpenAIServer,
+) -> None:
+    # Together returns a top-level JSON array of 280 models rather than
+    # {"data": [...]}. The ids are readable and the gateway routes from a
+    # curated catalog, so discovery must succeed.
+    results, models, _ = await _run(mock_server, "models_bare_array")
+
+    assert models == ["mock/model"]
+    discovery = next(r for r in results if r.id == "catalog.native-model-discovery")
+    assert discovery.status == "pass"

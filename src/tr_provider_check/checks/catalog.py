@@ -210,11 +210,20 @@ async def discover_native_models(client: GatewayClient) -> NativeModels:
     # ids and no top-level "object": "list"; requiring it found zero models,
     # blocked every downstream tier, and reported a working endpoint as having
     # a broken catalog. The gateway never reads that field.
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+    # Together returns a bare top-level array of 280 models rather than
+    # {"data": [...]}; Pearl returns {"data": [...]} with no "object": "list".
+    # Both are real, served providers whose ids are perfectly readable, and
+    # the gateway routes from a curated catalog rather than this envelope.
+    # Accept any shape whose model ids can be read, and let the declared-v2
+    # check police the marketplace declaration.
+    if isinstance(payload, list):
+        rows: object = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        rows = payload["data"]
+    else:
         return NativeModels(
-            [], response.status_code, "models response has no data[] array"
+            [], response.status_code, "models response has no readable model list"
         )
-    rows = payload.get("data")
     if not isinstance(rows, list) or not rows:
         return NativeModels([], response.status_code, "models data must be non-empty")
     ids: list[str] = []

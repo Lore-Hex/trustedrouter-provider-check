@@ -49,6 +49,7 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
         "capability_probe_backend_down": "A capability probe hits a 502 rather than a parameter refusal.",
         "structured_json_in_content_prose_in_reasoning": "Exact JSON in content while reasoning_content holds prose (Fireworks glm-5p2).",
         "gzipped_sse": "A conformant SSE stream compressed with gzip (Nebius).",
+        "models_bare_array": "Native discovery returns a top-level JSON array, not {data: [...]} (Together).",
     },
     "request_rejected_before_completion": {
         "queue_then_429": "Queueing consumes the probe budget before capacity rejects.",
@@ -511,6 +512,12 @@ class _MockHandler(BaseHTTPRequestHandler):
             return
         if mode == "native_models_empty":
             self._send_json(HTTPStatus.OK, {"object": "list", "data": []})
+            return
+        if mode == "models_bare_array":
+            self._send_json(
+                HTTPStatus.OK,
+                [{"id": "mock/model", "object": "model", "type": "chat"}],
+            )
             return
         if mode == "models_without_object_envelope":
             # pearlresearch.ai's real shape: valid ids, no object envelope.
