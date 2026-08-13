@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import time
+import zlib
 from collections.abc import AsyncIterator, Callable
 
 import httpx
@@ -61,8 +63,36 @@ def _skip(check_id: str, assertion: str, reason: str) -> CheckResult:
     )
 
 
+def _decoded_wire(body: bytes) -> bytes:
+    """Return the wire body with transport compression removed.
+
+    The recorder wraps the raw transport stream, so a provider that gzips its
+    SSE -- Nebius does -- hands us compressed bytes that contain no `data: `
+    lines. Reporting that as unreadable framing blames a provider for a
+    correct, merely compressed, response. httpx decodes for its own readers;
+    the recorder has to decode for itself.
+    """
+
+    if body[:2] == b"\x1f\x8b":
+        try:
+            return gzip.decompress(body)
+        except (OSError, EOFError, zlib.error):
+            # A truncated stream is normal here: the recording ends whenever
+            # the observer stopped reading, so decompress what is available.
+            try:
+                return zlib.decompressobj(zlib.MAX_WBITS | 16).decompress(body)
+            except zlib.error:
+                return body
+    if body[:1] == b"\x78":
+        try:
+            return zlib.decompressobj().decompress(body)
+        except zlib.error:
+            return body
+    return body
+
+
 def _wire_framing(body: bytes, content_type: str) -> tuple[bool, int, list[str]]:
-    text = body.decode("utf-8", "replace")
+    text = _decoded_wire(body).decode("utf-8", "replace")
     lines = text.splitlines()
     data_lines = [line for line in lines if line.startswith("data: ")]
     invalid_data_lines = [
@@ -405,7 +435,7 @@ async def run_streaming_checks(
         )
         return results
 
-    done_ok = any(line == b"data: [DONE]" for line in wire.splitlines())
+    done_ok = any(line == b"data: [DONE]" for line in _decoded_wire(wire).splitlines())
     results.append(
         check_result(
             id="stream.done",

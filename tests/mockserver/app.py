@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import threading
 import time
@@ -47,6 +48,7 @@ MOCK_MODE_GROUPS: dict[str, dict[str, str]] = {
         "models_without_data_array": "Native discovery returns an object with no data[] array at all.",
         "capability_probe_backend_down": "A capability probe hits a 502 rather than a parameter refusal.",
         "structured_json_in_content_prose_in_reasoning": "Exact JSON in content while reasoning_content holds prose (Fireworks glm-5p2).",
+        "gzipped_sse": "A conformant SSE stream compressed with gzip (Nebius).",
     },
     "request_rejected_before_completion": {
         "queue_then_429": "Queueing consumes the probe budget before capacity rejects.",
@@ -441,8 +443,16 @@ class _MockHandler(BaseHTTPRequestHandler):
     ) -> None:
         if initial_delay_seconds:
             time.sleep(initial_delay_seconds)
+        # Nebius gzips its SSE. A recorder that wraps the raw transport sees
+        # compressed bytes with no data: lines in them.
+        gzipped = self.headers.get("X-Mock-Mode") == "gzipped_sse"
+        if gzipped:
+            frames = [gzip.compress(b"".join(frames))]
+            incremental = False
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
+        if gzipped:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Connection", "close")
         self.end_headers()
         if not incremental:

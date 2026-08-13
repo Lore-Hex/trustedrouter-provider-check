@@ -261,3 +261,21 @@ async def test_unobserved_wire_is_not_reported_as_bad_framing(
             degraded = await run_streaming_checks(client2, "mock/model")
     degraded_framing = {r.id: r for r in degraded}["stream.sse-framing"]
     assert degraded_framing.status in {"warn", "fail"}
+
+
+@pytest.mark.asyncio
+async def test_gzipped_sse_is_read_not_reported_as_bad_framing(
+    mock_server: MockOpenAIServer,
+) -> None:
+    # Nebius compresses its SSE. The recorder wraps the raw transport, so the
+    # captured bytes are gzip and contain no data: lines; the provider was
+    # reported as emitting unreadable framing for a correct response.
+    client = GatewayClient(
+        f"{mock_server.base_url}/v1", "k" * 24, headers={"X-Mock-Mode": "gzipped_sse"}
+    )
+    async with client:
+        results = {r.id: r for r in await run_streaming_checks(client, "mock/model")}
+
+    assert results["stream.sse-framing"].status == "pass"
+    assert results["stream.sse-framing"].measured["data_line_count"] > 0
+    assert results["stream.done"].status == "pass"
