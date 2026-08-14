@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import dataclasses
 import time
 from decimal import Decimal, InvalidOperation
@@ -35,7 +37,17 @@ _THROUGHPUT_PROMPT = (
 
 
 def _number(value: object) -> float | None:
+    """Coerce a declared catalog number, rejecting values that are not usable.
+
+    Catalog values are untrusted: JSON permits the bare literals NaN and
+    Infinity and Python's json module accepts them, so a provider's declaration
+    can carry one. A non-finite value propagates silently through the spend and
+    latency estimates and eventually crashes the run, which turns one malformed
+    field into a failed check of an otherwise healthy endpoint.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
         return None
     return float(value)
 

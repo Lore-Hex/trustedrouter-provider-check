@@ -395,6 +395,12 @@ async def run_catalog_checks(
             TypeError,
             ValidationError,
             ValueError,
+            # contract._decimal raises RuntimeError for a malformed decimal
+            # string (contract.py:1519-1525). It was absent from this list, so
+            # a provider catalog with a bad price field crashed the entire run
+            # instead of being reported as a catalog problem — the one input
+            # this checker exists to be robust against.
+            RuntimeError,
         ) as error:
             catalog_error_type = error.__class__.__name__
             error_text = f"{error.__class__.__name__}: {error}"

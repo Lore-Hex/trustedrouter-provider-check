@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import time
 from collections.abc import AsyncIterator, Callable
 
@@ -194,10 +196,17 @@ async def run_streaming_checks(
         if isinstance(reliability, dict)
         else None
     )
+    # A declared budget comes from the provider's own catalog, which is
+    # untrusted input: JSON permits the bare literals NaN and Infinity, and
+    # Python's json module accepts them by default. A non-finite budget reaches
+    # arithmetic and comparisons that then crash the whole run with an uncaught
+    # ValueError, so one malformed catalog field takes down a conformance check
+    # of an otherwise healthy endpoint. Treat it as "not declared".
     declared_budget = (
         float(raw_declared_budget)
         if isinstance(raw_declared_budget, (int, float))
         and not isinstance(raw_declared_budget, bool)
+        and math.isfinite(raw_declared_budget)
         else None
     )
     if first_token_budget_seconds is not None:
