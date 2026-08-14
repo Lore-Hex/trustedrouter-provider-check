@@ -67,11 +67,7 @@ def test_catalog_validation_catches_the_decimal_runtime_error() -> None:
 
     tree = ast.parse(inspect.getsource(catalog))
     guards_catalog_validation = [
-        {
-            name.id
-            for name in ast.walk(handler.type)
-            if isinstance(name, ast.Name)
-        }
+        {name.id for name in ast.walk(handler.type) if isinstance(name, ast.Name)}
         for node in ast.walk(tree)
         if isinstance(node, ast.Try)
         for handler in node.handlers
