@@ -1142,7 +1142,7 @@ class ProviderStats:
 
 # Source: src/trusted_router/synthetic/leaderboard.py
 def _sort_key(p50_ttft_ms: int | None) -> tuple[int, int]:
-    # Latency breaks reliability ties; un-measured (None) sinks to the bottom.
+    # Fastest measured TTFT first; un-measured (None) sinks to the bottom.
     return (0 if p50_ttft_ms is not None else 1, p50_ttft_ms or 0)
 
 
@@ -1263,8 +1263,8 @@ def aggregate_leaderboard(
     models.sort(
         key=lambda stats: (
             0 if stats.rank_eligible else 1,
-            -stats.provider_availability,
             *_sort_key(stats.p50_ttft_ms),
+            -stats.provider_availability,
             stats.model,
             stats.provider,
         )
@@ -1351,8 +1351,8 @@ def _aggregate_providers(
     providers.sort(
         key=lambda stats: (
             0 if stats.rank_eligible else 1,
-            -stats.provider_availability,
             *_sort_key(stats.p50_ttft_ms),
+            -stats.provider_availability,
             stats.provider,
         )
     )
