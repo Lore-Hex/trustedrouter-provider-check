@@ -13,6 +13,7 @@ from tr_provider_check.checks.callability import (
 from tr_provider_check.checks.catalog import CatalogEvidence, run_catalog_checks
 from tr_provider_check.checks.chat import run_chat_checks
 from tr_provider_check.checks.perf import DEFAULT_PERF_SAMPLES, run_performance_checks
+from tr_provider_check.checks.receipts import run_receipt_checks
 from tr_provider_check.checks.streaming import run_streaming_checks
 from tr_provider_check.checks.structured import run_structured_checks
 from tr_provider_check.checks.tools import run_tool_checks
@@ -126,6 +127,14 @@ async def run_checks(
                         client,
                         selected_model,
                         evidence=evidence,
+                    )
+                )
+                results.extend(
+                    await run_receipt_checks(
+                        client,
+                        selected_model,
+                        capability=evidence.receipt_capability(selected_model),
+                        expected_origin=client.base_url,
                     )
                 )
 

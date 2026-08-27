@@ -51,6 +51,21 @@ CHECK_ASSERTIONS: dict[str, str] = {
     "stream.incremental-delivery": (
         "the provider does not withhold the whole successful stream before delivery"
     ),
+    "receipt.header": (
+        "a receipt-opted non-streaming response carries a compact EdDSA inference receipt JWS"
+    ),
+    "receipt.stream-position": (
+        "exactly one inference_receipt data event is last before [DONE]"
+    ),
+    "receipt.signature": (
+        "the flattened receipt signature verifies with its Ed25519 jwk and matching kid"
+    ),
+    "receipt.bindings": (
+        "receipt hashes bind the exact request body and captured SSE data events, and echo the nonce"
+    ),
+    "receipt.issuer": (
+        "receipt iss exactly matches the configured canonical HTTPS API origin"
+    ),
     "tools.parallel-deltas": (
         "a forced parallel tool stream emits well-formed indexed calls whose first "
         "deltas have function.name and whose concatenated arguments are valid JSON"

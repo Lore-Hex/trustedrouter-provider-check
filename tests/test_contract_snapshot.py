@@ -66,6 +66,7 @@ _UNHASHED_PROVENANCE_ALLOWLIST: dict[str, str] = {
     "MONITOR_CONFIGURATION_ERROR_TYPES": "The snapshot marker table pins this constant's complete value.",
     "_ACCOUNT_QUOTA_MARKERS": "The snapshot marker table pins this constant's complete value.",
     "_CAPABILITY_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
+    "_CAPABILITY_V2_OPTIONAL_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
     "_CAPACITY_SCOPES": "The catalog frozenset replay pins this constant's complete value.",
     "_CONFIG_TYPES": "The snapshot marker table pins this constant's complete value.",
     "_CUSTOMER_QUOTA_TYPES": "The snapshot marker table pins this constant's complete value.",
@@ -86,6 +87,10 @@ _UNHASHED_PROVENANCE_ALLOWLIST: dict[str, str] = {
     "_PROBE_CONFIG_ERROR_TYPES": "The snapshot marker table pins this constant's complete value.",
     "_PROBE_CONFIG_MESSAGE_MARKERS": "The snapshot marker table pins this constant's complete value.",
     "_PROVIDER_V2_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
+    "_RECEIPT_ALGORITHMS": "The catalog frozenset replay pins this constant's complete value.",
+    "_RECEIPT_DELIVERY": "The catalog frozenset replay pins this constant's complete value.",
+    "_RECEIPT_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
+    "_RECEIPT_SPECS": "The catalog frozenset replay pins this constant's complete value.",
     "_RELIABILITY_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
     "_SLOW_REASONING_MARKERS": "The snapshot marker table pins this constant's complete value.",
     "_STREAM_MARKERS": "The snapshot marker table pins this constant's complete value.",
@@ -640,6 +645,12 @@ def test_catalog_invariants_replay(contract_data: dict[str, Any]) -> None:
             "minimum_request": 0,
             "cache_write_allowed_values": [None, 0],
             "prompt_caching_matches_cached_input_presence": True,
+        },
+        "receipts": {
+            "required": False,
+            "specs": ["inference-receipt/1"],
+            "algorithms": ["EdDSA"],
+            "delivery": ["header", "stream-chunk"],
         },
     }
 
