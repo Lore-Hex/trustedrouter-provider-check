@@ -285,6 +285,7 @@ class GatewayClient:
         max_tokens: int | None = None,
         max_tokens_key: MaxTokenParameter | None = None,
         extra: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         """Issue a non-streaming diagnostic using the gateway's common fields."""
 
@@ -297,10 +298,13 @@ class GatewayClient:
             max_tokens_key=max_tokens_key,
             extra=extra,
         )
+        request_headers = {"Accept": JSON_ACCEPT}
+        if headers:
+            request_headers.update(headers)
         return await self._client.post(
             f"{self.base_url}/chat/completions",
             json=body,
-            headers={"Accept": JSON_ACCEPT},
+            headers=request_headers,
         )
 
     @asynccontextmanager
@@ -313,6 +317,7 @@ class GatewayClient:
         max_tokens: int | None = None,
         max_tokens_key: MaxTokenParameter | None = None,
         extra: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[httpx.Response]:
         """Open a stream, retrying transient failures before body bytes escape.
 
@@ -332,11 +337,14 @@ class GatewayClient:
         )
         response: httpx.Response | None = None
         for attempt in range(MAX_TRANSIENT_RETRIES + 1):
+            request_headers = {"Accept": SSE_ACCEPT}
+            if headers:
+                request_headers.update(headers)
             request = self._client.build_request(
                 "POST",
                 f"{self.base_url}/chat/completions",
                 json=body,
-                headers={"Accept": SSE_ACCEPT},
+                headers=request_headers,
             )
             try:
                 response = await self._client.send(request, stream=True)

@@ -15,6 +15,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 from tr_provider_check.checks.assertions import assertion_for
 from tr_provider_check.contract import (
     _CAPABILITY_FIELDS,
+    _CAPABILITY_V2_OPTIONAL_FIELDS,
     _ERROR_CONTRACT_FIELDS,
     _LIFECYCLE_FIELDS,
     _MODEL_ID_RE,
@@ -22,6 +23,10 @@ from tr_provider_check.contract import (
     _OWNER_RE,
     _PRICING_FIELDS,
     _PROVIDER_V2_FIELDS,
+    _RECEIPT_ALGORITHMS,
+    _RECEIPT_DELIVERY,
+    _RECEIPT_FIELDS,
+    _RECEIPT_SPECS,
     _RELIABILITY_FIELDS,
     _TOP_LEVEL_V2_FIELDS,
     _decimal,
@@ -77,6 +82,18 @@ class CatalogEvidence:
             return True
         return False if claims else None
 
+    def receipt_capability(self, model: str) -> dict[str, Any] | None:
+        """Return the validated Catalog v2 receipt declaration, if present."""
+
+        matches = self._declared_matches(model)
+        if len(matches) != 1:
+            return None
+        capabilities = matches[0].get("capabilities")
+        if not isinstance(capabilities, dict):
+            return None
+        receipts = capabilities.get("receipts")
+        return receipts if isinstance(receipts, dict) else None
+
     def reliability(self, model: str) -> dict[str, Any] | None:
         matches = self._declared_matches(model)
         if len(matches) != 1:
@@ -108,15 +125,42 @@ class CatalogEvidence:
         return declared
 
 
-def _exact_fields(value: object, expected: frozenset[str], label: str) -> None:
+def _exact_fields(
+    value: object,
+    expected: frozenset[str],
+    label: str,
+    *,
+    optional: frozenset[str] = frozenset(),
+) -> None:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be an object")
     actual = frozenset(str(key) for key in value)
-    if actual != expected:
+    missing = expected - actual
+    extra = actual - expected - optional
+    if missing or extra:
         raise ValueError(
-            f"{label} fields invalid: missing={sorted(expected - actual)}, "
-            f"extra={sorted(actual - expected)}"
+            f"{label} fields invalid: missing={sorted(missing)}, extra={sorted(extra)}"
         )
+
+
+def _validate_receipt_capability(value: object, label: str) -> None:
+    _exact_fields(value, _RECEIPT_FIELDS, label)
+    assert isinstance(value, dict)
+    if value.get("spec") not in _RECEIPT_SPECS:
+        raise ValueError(f"{label}.spec is unsupported")
+    for name, allowed in (
+        ("algorithms", _RECEIPT_ALGORITHMS),
+        ("delivery", _RECEIPT_DELIVERY),
+    ):
+        items = value.get(name)
+        if (
+            not isinstance(items, list)
+            or not items
+            or any(not isinstance(item, str) for item in items)
+            or len(items) != len(set(items))
+            or not set(items) <= allowed
+        ):
+            raise ValueError(f"{label}.{name} is unsupported")
 
 
 def _validate_vendored_rules(payload: object) -> None:
@@ -148,9 +192,18 @@ def _validate_vendored_rules(payload: object) -> None:
         owner = row.get("owned_by")
         if not isinstance(owner, str) or _OWNER_RE.fullmatch(owner) is None:
             raise ValueError(f"{label}.owned_by is invalid")
+        capabilities = row.get("capabilities")
         _exact_fields(
-            row.get("capabilities"), _CAPABILITY_FIELDS, f"{label}.capabilities"
+            capabilities,
+            _CAPABILITY_FIELDS,
+            f"{label}.capabilities",
+            optional=_CAPABILITY_V2_OPTIONAL_FIELDS,
         )
+        assert isinstance(capabilities, dict)
+        if "receipts" in capabilities:
+            _validate_receipt_capability(
+                capabilities["receipts"], f"{label}.capabilities.receipts"
+            )
         _exact_fields(row.get("pricing"), _PRICING_FIELDS, f"{label}.pricing")
         _exact_fields(row.get("lifecycle"), _LIFECYCLE_FIELDS, f"{label}.lifecycle")
         _exact_fields(

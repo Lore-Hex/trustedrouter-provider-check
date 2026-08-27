@@ -12,6 +12,41 @@
             "reasoning": {
               "type": "boolean"
             },
+            "receipts": {
+              "additionalProperties": false,
+              "properties": {
+                "algorithms": {
+                  "items": {
+                    "enum": [
+                      "EdDSA"
+                    ]
+                  },
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "delivery": {
+                  "items": {
+                    "enum": [
+                      "header",
+                      "stream-chunk"
+                    ]
+                  },
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "spec": {
+                  "const": "inference-receipt/1"
+                }
+              },
+              "required": [
+                "spec",
+                "algorithms",
+                "delivery"
+              ],
+              "type": "object"
+            },
             "streaming": {
               "type": "boolean"
             },

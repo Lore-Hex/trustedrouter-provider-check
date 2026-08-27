@@ -46,7 +46,7 @@ import httpx
 #: content hash cannot dangle, whereas a branch commit disappears the moment
 #: it is squash-merged -- which is exactly how the previous pin rotted.
 UPSTREAM_REPOSITORY = "https://github.com/Lore-Hex/quill-router"
-UPSTREAM_COMMIT = "e3c4930fc2b0b5d10bd9bc6f4a22fd0a0e60952a"
+UPSTREAM_COMMIT = "f2f2ab95dbcc6da9bd2d88f96d2f541b350e8156"
 
 
 # Public-package projection of the fields consumed by the vendored leaderboard.
@@ -1443,6 +1443,21 @@ _MODEL_V2_FIELDS = _MODEL_FIELDS | {"reliability"}
 _CAPABILITY_FIELDS = frozenset(
     {"streaming", "tools", "structured_output", "reasoning", "prompt_caching"}
 )
+
+# Source: scripts/pricing/provider_contract_catalog.py
+_CAPABILITY_V2_OPTIONAL_FIELDS = frozenset({"receipts"})
+
+# Source: scripts/pricing/provider_contract_catalog.py
+_RECEIPT_FIELDS = frozenset({"spec", "algorithms", "delivery"})
+
+# Source: scripts/pricing/provider_contract_catalog.py
+_RECEIPT_SPECS = frozenset({"inference-receipt/1"})
+
+# Source: scripts/pricing/provider_contract_catalog.py
+_RECEIPT_ALGORITHMS = frozenset({"EdDSA"})
+
+# Source: scripts/pricing/provider_contract_catalog.py
+_RECEIPT_DELIVERY = frozenset({"header", "stream-chunk"})
 
 # Source: scripts/pricing/provider_contract_catalog.py
 _PRICING_FIELDS = frozenset(

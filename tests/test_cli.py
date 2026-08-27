@@ -147,7 +147,7 @@ def test_env_key_never_appears_in_report_stdout_stderr_or_logs(
     assert exit_code == 0
     assert output_path.is_file()
     document = json.loads(rendered_json)
-    assert len(document["checks"]) == 18
+    assert len(document["checks"]) == 23
     assert document["target"]["authentication"]["mode"] == "bearer"
     assert document["target"]["authentication"]["authorization_header_sent"] is True
     assert sentinel not in rendered_json
