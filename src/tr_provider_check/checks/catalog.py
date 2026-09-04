@@ -19,6 +19,7 @@ from tr_provider_check.contract import (
     _ERROR_CONTRACT_FIELDS,
     _LIFECYCLE_FIELDS,
     _MODEL_ID_RE,
+    _MODEL_OPTIONAL_FIELDS,
     _MODEL_V2_FIELDS,
     _OWNER_RE,
     _PRICING_FIELDS,
@@ -184,7 +185,7 @@ def _validate_vendored_rules(payload: object) -> None:
         raise ValueError("catalog.data must be an array")
     for index, row in enumerate(rows):
         label = f"catalog.data[{index}]"
-        _exact_fields(row, _MODEL_V2_FIELDS, label)
+        _exact_fields(row, _MODEL_V2_FIELDS, label, optional=_MODEL_OPTIONAL_FIELDS)
         assert isinstance(row, dict)
         model_id = row.get("id")
         if not isinstance(model_id, str) or _MODEL_ID_RE.fullmatch(model_id) is None:

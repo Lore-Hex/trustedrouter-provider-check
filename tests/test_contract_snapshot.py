@@ -80,6 +80,7 @@ _UNHASHED_PROVENANCE_ALLOWLIST: dict[str, str] = {
     "_LIFECYCLE_STATUSES": "The catalog frozenset replay pins this constant's complete value.",
     "_MODEL_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
     "_MODEL_ID_RE": "The catalog regex replay pins this pattern.",
+    "_MODEL_OPTIONAL_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
     "_MODEL_V2_FIELDS": "The catalog frozenset replay pins this constant's complete value.",
     "_OUTPUT_MODALITIES": "The catalog frozenset replay pins this constant's complete value.",
     "_OWNER_RE": "The catalog regex replay pins this pattern.",
