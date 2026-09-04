@@ -1440,6 +1440,9 @@ _MODEL_FIELDS = frozenset(
 _MODEL_V2_FIELDS = _MODEL_FIELDS | {"reliability"}
 
 # Source: scripts/pricing/provider_contract_catalog.py
+_MODEL_OPTIONAL_FIELDS = frozenset({"documentation"})
+
+# Source: scripts/pricing/provider_contract_catalog.py
 _CAPABILITY_FIELDS = frozenset(
     {"streaming", "tools", "structured_output", "reasoning", "prompt_caching"}
 )

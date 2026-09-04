@@ -70,6 +70,44 @@
           "minimum": 1,
           "type": "integer"
         },
+        "documentation": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "example_input": {
+              "maxLength": 8192,
+              "minLength": 1,
+              "type": "string"
+            },
+            "example_output": {
+              "maxLength": 8192,
+              "minLength": 1,
+              "type": "string"
+            },
+            "input_format": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "output_format": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "description",
+            "input_format",
+            "output_format",
+            "example_input",
+            "example_output"
+          ],
+          "type": "object"
+        },
         "endpoints": {
           "items": {
             "enum": [
