@@ -484,6 +484,7 @@ async def _observe_provider_stream(
     *,
     started: float,
     clock: Callable[[], float] = time.perf_counter,
+    on_first_token: Callable[[], None] | None = None,
 ) -> _StreamObservation:
     observation = _StreamObservation()
     tail = ""
@@ -499,6 +500,8 @@ async def _observe_provider_stream(
         if _sse_line_has_content(line):
             if observation.first_token_milliseconds is None:
                 observation.first_token_milliseconds = now_milliseconds
+                if on_first_token is not None:
+                    on_first_token()
             observation.last_token_milliseconds = now_milliseconds
         usage = _sse_line_usage(line)
         if usage is not None:

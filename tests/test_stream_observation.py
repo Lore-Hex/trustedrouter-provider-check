@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from typing import Any
 
@@ -91,6 +92,38 @@ async def test_production_stream_observer_reads_mock_wire_modes(
         assert (
             observation.first_token_milliseconds == observation.last_token_milliseconds
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_field", ["content", "reasoning", "thinking"])
+async def test_first_token_callback_runs_once_not_for_heartbeats(
+    token_field: str,
+) -> None:
+    import json
+
+    callbacks: list[str] = []
+
+    def callback() -> None:
+        callbacks.append("first-token")
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b': keepalive\n\ndata: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+            assert callbacks == []
+            token = json.dumps({"choices": [{"delta": {token_field: "PONG"}}]})
+            yield f"data: {token}\n\n".encode()
+            assert callbacks == ["first-token"]
+            yield f"data: {token}\n\ndata: [DONE]\n\n".encode()
+
+    response = httpx.Response(200, stream=Stream())
+    try:
+        observation = await contract._observe_provider_stream(
+            response, started=time.perf_counter(), on_first_token=callback
+        )
+    finally:
+        await response.aclose()
+    assert observation.first_token_milliseconds is not None
+    assert callbacks == ["first-token"]
 
 
 _CONTRACT_DATA: dict[str, Any] = snapshot.load_contract()
