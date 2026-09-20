@@ -33,8 +33,8 @@ assert set(ADAPTED) == {"model_deadlines"}
 # sides of that one call-site adaptation so neither can drift silently.
 _CALLSITE_SOURCE_ADAPTATIONS = {
     "leaderboard.aggregate_leaderboard": {
-        "production": "773c03374c2209a5bd971650658ca2deb722236969e79d51489ecd3330a5f0dd",
-        "public": "b1cdcd17b495c1acb3fa802e98d5c21543cc92a6b38f9374dce6219487656757",
+        "production": "650cbe204f0fd8302030fa7cb1929cb44816b3205f4f27e801b6b4f4d979257d",
+        "public": "b1f3086fbd65f3a314bc6a651db4bf5fd0b6a7b21e5cd47e57600b6d67f655d1",
     }
 }
 
