@@ -275,6 +275,7 @@ _SLOW_REASONING_MARKERS = (
     "gpt-5.5",
     "gpt-5.6",
     "glm-5",
+    "kimi-k3",
     "opus",
     "/o1",
     "/o3",
@@ -629,8 +630,12 @@ def _rotation_error_type(
         )
     ):
         return "monitor_account_unavailable"
-    if raw_type in _UNSUPPORTED_ROUTE_ERROR_TYPES or any(
-        marker in raw_message for marker in _UNSUPPORTED_ROUTE_MESSAGE_MARKERS
+    # A 503 "service unavailable" is downtime, not a missing catalog model.
+    # Only explicit model error types or client-side validation responses
+    # justify removing an attempt from provider availability.
+    if raw_type in _UNSUPPORTED_ROUTE_ERROR_TYPES or (
+        status in {400, 404, 422}
+        and any(marker in raw_message for marker in _UNSUPPORTED_ROUTE_MESSAGE_MARKERS)
     ):
         return "unsupported_route"
     if raw_type in _PROBE_CONFIG_ERROR_TYPES or (
@@ -655,17 +660,32 @@ _THROUGHPUT_PROMPT = (
 
 # Source: src/trusted_router/synthetic/probes.py
 def _rotation_max_tokens(provider: str, model: str) -> int:
-    provider_l = provider.lower()
     model_l = model.lower()
-    if provider_l == "openai" and (
-        "/o1" in model_l or "/o3" in model_l or "/o4" in model_l or "/gpt-5" in model_l
-    ):
+    if "/o1" in model_l or "/o3" in model_l or "/o4" in model_l or "/gpt-5" in model_l:
         return 512
     if "gemini-2.5" in model_l or "gemini-3" in model_l:
         # Gemini thinks before visible content; hidden thinking consumes the
         # budget but is absent from usage, so 16 yields empty_stream. Live
         # verification on 2026-07-19 showed 2048 works; keep generous headroom.
         return 2048
+    # Publisher/model capability is independent of the hosting provider.
+    # These families exhausted 16 tokens with finish_reason=length in real
+    # probes. One shared bounded budget avoids host-by-host special cases.
+    if any(
+        family in model_l
+        for family in (
+            "qwen3",
+            "qwen-3",
+            "deepseek-v4",
+            "deepseek-r1",
+            "kimi-k3",
+            "gemma-4",
+            "minimax-m",
+            "mercury",
+            "fugu",
+        )
+    ):
+        return 512
     if (
         "gpt-oss" in model_l
         or "glm-4.6" in model_l
@@ -677,10 +697,12 @@ def _rotation_max_tokens(provider: str, model: str) -> int:
         or "reasoning" in model_l
         or "thinking" in model_l
     ):
-        # Some models reason before emitting visible content: at 16 tokens they
-        # finish=length with zero streamed content and register as
-        # probe_config_error. Models that omit those reasoning deltas need the
-        # larger budget to emit a visible token.
+        # Reasoning models that think before emitting visible content: at 16
+        # tokens they finish=length with zero streamed content and register as
+        # probe_config_error. Crusoe nemotron-3 reasons by default without
+        # streaming reasoning deltas; Claude Fable 5 (adaptive thinking always
+        # on) and Sonnet 5 do the same, so they need the larger budget to emit
+        # a visible token.
         return 512
     if "kimi-k2" in model_l or "grok" in model_l or "claude-opus" in model_l:
         return 128
@@ -693,10 +715,7 @@ def _rotation_omits_temperature(provider: str, model: str) -> bool:
     model_l = model.lower()
     return (
         (provider_l == "kimi" and "kimi-k2." in model_l)
-        or (
-            provider_l == "openai"
-            and ("/o1" in model_l or "/o3" in model_l or "/o4" in model_l or "/gpt-5" in model_l)
-        )
+        or ("/o1" in model_l or "/o3" in model_l or "/o4" in model_l or "/gpt-5" in model_l)
         or (
             provider_l == "anthropic"
             and ("claude-opus-4.7" in model_l or "claude-opus-4.8" in model_l)
@@ -1208,6 +1227,8 @@ def aggregate_leaderboard(
         if _excluded_from_uptime(sample):
             stats.excluded_count += 1
             stats.excluded_reasons[label] += 1
+            if stats.last_seen is None or sample.created_at > stats.last_seen:
+                stats.last_seen = sample.created_at
             continue
         stats.sample_count += 1
         if sample.status == "success":
@@ -1258,7 +1279,9 @@ def aggregate_leaderboard(
     models = [
         stats
         for stats in by_model.values()
-        if stats.sample_count >= min_samples or stats.throughput_sample_count >= min_samples
+        if stats.sample_count >= min_samples
+        or stats.throughput_sample_count >= min_samples
+        or stats.excluded_count > 0
     ]
     models.sort(
         key=lambda stats: (
