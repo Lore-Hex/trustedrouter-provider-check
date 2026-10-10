@@ -686,6 +686,8 @@ def _rotation_max_tokens(provider: str, model: str) -> int:
             "minimax-m",
             "mercury",
             "fugu",
+            "muse-spark",
+            "mistral-large-4",
         )
     ):
         return 512
