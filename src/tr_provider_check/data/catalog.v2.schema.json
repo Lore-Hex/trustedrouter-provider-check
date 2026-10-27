@@ -264,7 +264,7 @@
             },
             "completion_timeout_seconds": {
               "exclusiveMinimum": 0,
-              "maximum": 900,
+              "maximum": 3600,
               "type": "number"
             },
             "first_token_timeout_seconds": {
@@ -312,10 +312,18 @@
   "$id": "https://trustedrouter.com/providers/marketplace/catalog.v2.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"contract_version": {"const": "2.0"}}},
+      "then": {"properties": {"data": {"items": {"properties": {
+        "reliability": {"properties": {"completion_timeout_seconds": {"maximum": 900}}}
+      }}}}}
+    }
+  ],
   "description": "Canonical models, pricing, lifecycle, regional capacity, deadlines, and machine-readable overload semantics for TrustedRouter providers.",
   "properties": {
     "contract_version": {
-      "const": "2.0"
+      "enum": ["2.0", "2.1"]
     },
     "data": {
       "items": {
