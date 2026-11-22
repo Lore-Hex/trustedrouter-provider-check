@@ -37,6 +37,8 @@ jobs:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v6
       - run: uv build
+      - name: Exercise optional attestation adapter (offline tests, no credentials)
+        run: uv run --extra cc pytest -q tests/test_confidential.py
       - name: Smoke-test the installed wheel and packaged snapshot
         run: |
           smoke_env="$(mktemp -d)"
