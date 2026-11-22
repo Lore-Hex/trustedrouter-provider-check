@@ -14,6 +14,13 @@ configurable mock HTTP server. The checks have also been exercised against nine
 live OpenAI-compatible endpoints during development; that is point-in-time test
 evidence, not certification. Tier 6 performance remains advisory.
 
+**New marketplace providers:** TrustedRouter must independently verify confidential
+inference for at least one model. The ordinary HTTP suite does not establish that.
+Follow the [confidential endpoint self-check](docs/confidential-endpoint.md) for
+the evidence checklist, Tinfoil-compatible probe, and a prompt for Claude.
+Need help setting up confidential compute? [Work with provider operations](https://trustedrouter.com/providers/marketplace#confidential-onboarding)
+before you apply; no credentials are needed to start.
+
 ## Running the checker
 
 Install the project with [uv](https://docs.astral.sh/uv/), then pass the API root

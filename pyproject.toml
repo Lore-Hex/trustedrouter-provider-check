@@ -35,6 +35,10 @@ Homepage = "https://trustedrouter.com"
 Repository = "https://github.com/Lore-Hex/trustedrouter-provider-check"
 Issues = "https://github.com/Lore-Hex/trustedrouter-provider-check/issues"
 
+[project.optional-dependencies]
+# Only the opt-in confidential endpoint probe imports this SDK.
+cc = ["tinfoil==0.16.0rc3"]
+
 [dependency-groups]
 dev = [
     "mypy",
@@ -46,6 +50,7 @@ dev = [
 
 [project.scripts]
 trustedrouter-provider-check = "tr_provider_check.cli:main"
+trustedrouter-cc-check = "tr_provider_check.confidential:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tr_provider_check"]
